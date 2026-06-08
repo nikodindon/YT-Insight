@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from yt_insight.transcriber import TranscriptionResult
@@ -99,6 +99,7 @@ class BaseAnalyzer(ABC):
         *,
         title: str = "",
         language: str | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> AnalysisResult:
         """
         Run the full analysis pipeline on *transcription* and return an

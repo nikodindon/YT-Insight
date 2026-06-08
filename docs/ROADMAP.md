@@ -29,11 +29,11 @@ clear "Definition of Done".
 - [ ] Type checking with Pyright in CI (currently local-only)
 
 ## Phase 5 — Streaming, progress, interactivity
-- [ ] **🔄 Streaming SSE for LLM analysis** *(see ticket below)*
-- [ ] **Live progress bar** for chunk+merge analyses (Rich Progress)
-- [ ] **ETA estimate** during long runs
-- [ ] **Cancellation** — Ctrl-C should cleanly stop chunk+merge mid-flight
-- [ ] **Reactive TUI** — show chunks being summarized in real time
+- [x] **✅ Streaming SSE for LLM analysis** — completed 2026-06-08 (commit `TBD`)
+- [ ] **Live progress bar** for chunk+merge analyses (Rich Progress) — not started
+- [ ] **ETA estimate** during long runs — not started
+- [ ] **Cancellation** — Ctrl-C should cleanly stop chunk+merge mid-flight — not started
+- [ ] **Reactive TUI** — show chunks being summarized in real time — not started
 
 ---
 

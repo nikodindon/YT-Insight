@@ -25,7 +25,9 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
+from rich.text import Text
 
 from . import __version__
 from .analyzer import create_analyzer
@@ -99,6 +101,84 @@ def _print_kv(console: Console, items: list[tuple[str, str]]) -> None:
     width = max(len(k) for k, _ in items) if items else 0
     for k, v in items:
         console.print(f"  [cyan]{k.ljust(width)}[/]  {v}")
+
+
+def _run_analyze_with_live(
+    console: Console,
+    analyzer,                                  # LlamaCppLocalAnalyzer (forward ref)
+    transcription: "TranscriptionResult",
+    *,
+    title: str,
+    language: str | None,
+    show_live: bool = True,
+):
+    """
+    Run ``analyzer.analyze()`` and stream the LLM output live to the terminal.
+
+    The Rich ``Live`` panel shows the model's tokens as they arrive, plus a
+    running stats line (chars + elapsed seconds). If ``show_live`` is False
+    (e.g. in tests / pipe mode), the analyzer is called without a callback
+    and the result is returned when ready.
+    """
+    if not show_live or console.is_interactive is False:
+        with analyzer:
+            return analyzer.analyze(
+                transcription, title=title, language=language,
+            )
+
+    # Live state — mutated by the on_token callback.
+    state: dict[str, object] = {
+        "chars": 0,
+        "tokens": 0,
+        "t0": time.time(),
+        "buffer": "",
+    }
+
+    def on_token(delta: str) -> None:
+        state["chars"] = int(state["chars"]) + len(delta)  # type: ignore[arg-type]
+        state["tokens"] = int(state["tokens"]) + 1  # type: ignore[arg-type]
+        state["buffer"] = str(state["buffer"]) + delta  # type: ignore[assignment]
+        # Trim the preview so the panel doesn't grow forever.
+        if len(str(state["buffer"])) > 1200:  # type: ignore[arg-type]
+            state["buffer"] = "…" + str(state["buffer"])[-1000:]  # type: ignore[assignment]
+
+    def make_panel() -> Panel:
+        elapsed = time.time() - float(state["t0"])  # type: ignore[arg-type]
+        body = Text(str(state["buffer"]), style="bright_white")  # type: ignore[arg-type]
+        footer = Text(
+            f" {int(state['chars'])} chars · {int(state['tokens'])} tokens · "  # type: ignore[arg-type]
+            f"{elapsed:.1f}s ",
+            style="dim cyan",
+        )
+        return Panel(
+            body,
+            title="[bold magenta]LLM generation[/]",
+            subtitle=footer,
+            border_style="magenta",
+            padding=(0, 1),
+        )
+
+    from .analyzer.llamacpp_local import AnalysisError
+
+    with Live(make_panel(), console=console, refresh_per_second=8, transient=False) as live:
+        def live_on_token(delta: str) -> None:
+            on_token(delta)
+            live.update(make_panel())
+
+        with analyzer:
+            try:
+                result = analyzer.analyze(
+                    transcription, title=title, language=language,
+                    on_token=live_on_token,
+                )
+            except AnalysisError:
+                # Surface the error inside the panel before letting it bubble.
+                state["buffer"] = str(state["buffer"]) + "\n\n[ERROR] "  # type: ignore[assignment]
+                live.update(make_panel())
+                raise
+        # Final update so the user sees the last tokens.
+        live.update(make_panel())
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -342,8 +422,10 @@ def analyze(
         timeout_s=llamacpp_timeout,
     )
     t0 = time.time()
-    with analyzer:
-        analysis = analyzer.analyze(transcription, title=title, language=language)
+    analysis = _run_analyze_with_live(
+        console, analyzer, transcription,
+        title=title, language=language, show_live=True,
+    )
     elapsed = time.time() - t0
 
     console.print(f"  [green]✓[/green] Analyse terminée en {elapsed:.1f}s")
@@ -518,8 +600,10 @@ def all(  # noqa: A001 — `all` is the command name users will type
             timeout_s=llamacpp_timeout,
         )
         t0 = time.time()
-        with analyzer:
-            analysis = analyzer.analyze(transcription, title=title, language=language)
+        analysis = _run_analyze_with_live(
+            console, analyzer, transcription,
+            title=title, language=language, show_live=not no_console,
+        )
         elapsed = time.time() - t0
         _print_kv(console, [
             ("🤖 Modèle",         analysis.model_name),

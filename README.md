@@ -49,12 +49,12 @@ Chaque étape est modulaire, testable indépendamment, et configurable pour tour
 | **Analyzer**    | `analyzer/{base,prompts,llamacpp_local}.py`     | 25 ✅   | **Terminé**   |
 | **Utils**       | `utils/{text_utils,config,logger}.py`           | 41 ✅   | **Terminé**   |
 | **Output**      | `output/{console,file_writer}.py`               | 21 ✅   | **Terminé**   |
-| **CLI**         | `cli.py` (5 sous-commandes Typer)               | 22 ✅   | **Terminé**   |
+| **CLI**         | `cli.py` (5 sous-commandes Typer + Rich Live panel) | 22 ✅   | **Terminé**   |
 | **Estimate**    | `estimate.py` + 3 tests CLI                    | 24 ✅   | **Terminé**   |
 
-Total : **200 tests passent** (`pytest tests/ -q`).
+Total : **206 tests passent** (`pytest tests/ -q`).
 
-Voir aussi [`docs/ROADMAP.md`](docs/ROADMAP.md) pour les tickets à venir (streaming SSE, playlists, PDF, etc.).
+Voir aussi [`docs/ROADMAP.md`](docs/ROADMAP.md) pour les tickets à venir (playlists, PDF, etc.).
 
 ---
 
@@ -441,6 +441,16 @@ WHISPER_DEVICE=cpu yt-insight all "URL"
 
 # Augmenter le timeout HTTP pour les très longues analyses (défaut 30 min)
 yt-insight all "URL" --llamacpp-timeout 3600   # 1h
+
+# Abaisser l'idle timeout pour fail-fast sur génération bloquée (défaut 2 min)
+yt-insight all "URL" --llamacpp-idle-timeout 60
+
+# Pendant l'analyse, le panel Rich Live affiche les tokens en temps réel :
+#  ╭─ LLM generation ──────────────────────────────────────────╮
+#  │ The speaker Duhun, founder of Base 10, opens with his    │
+#  │ background transitioning from finance to ML engineering... │
+#  │                                                         │
+#  ╰──  1847 chars · 312 tokens · 38.2s  ──────────────────╯
 
 # Cache transcript : si on a déjà transcrit une vidéo, le 2e run skip la
 # transcription. Le JSON est dans cache/{video_id}.transcript.json
@@ -1192,7 +1202,7 @@ TestConstants          — 6 tests  (ordres RTFX, TPS, WPM, sanity)
 - [ ] Recherche full-text dans les transcriptions
 
 ### Phase 4 — Qualité
-- [x] Suite de tests complète (200/200 ✅)
+- [x] Suite de tests complète (206/206 ✅)
 - [ ] CI/CD GitHub Actions
 - [ ] Dockerisation
 - [ ] Packaging PyPI

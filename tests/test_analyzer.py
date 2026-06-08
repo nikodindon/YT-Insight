@@ -7,6 +7,7 @@ The HTTP layer is mocked throughout — no llama-server required.
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -80,6 +81,46 @@ def _fake_chat_response(content: str) -> SimpleNamespace:
     resp.json.return_value = body
     resp.raise_for_status.return_value = None
     return resp
+
+
+def _fake_streaming_response(
+    content: str,
+    status_code: int = 200,
+    error_body: str = "internal error",
+) -> MagicMock:
+    """
+    Build a fake httpx streaming response that yields the given content
+    as SSE ``data:`` lines (one chunk), then ``[DONE]``.
+
+    Use as the return value of ``fake_client.stream(...)``:
+        fake_client.stream.return_value.__enter__.return_value = <this>
+    """
+    # Build SSE event(s). We send the whole content in a single delta
+    # for simplicity — most tests just check the assembled string.
+    payload = {"choices": [{"delta": {"content": content}}]}
+    sse_lines = [f"data: {json.dumps(payload)}", "data: [DONE]"]
+
+    resp = MagicMock()
+    resp.status_code = status_code
+    if status_code >= 400:
+        # Body fetch on error
+        resp.read.return_value = error_body.encode("utf-8")
+    resp.iter_lines.return_value = iter(sse_lines)
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+def _install_streaming_post_mock(fake_client: MagicMock, content: str) -> None:
+    """
+    Wire ``fake_client.stream(...)`` to return a context manager that
+    yields a fake SSE response containing *content* as a single delta.
+    Also keeps ``fake_client.get(...)`` working (for the /v1/models
+    handshake in the analyzer).
+    """
+    stream_cm = MagicMock()
+    stream_cm.__enter__.return_value = _fake_streaming_response(content)
+    stream_cm.__exit__.return_value = False
+    fake_client.stream.return_value = stream_cm
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +223,7 @@ class TestSingleShotAnalyze:
         }
         fake_client = MagicMock()
         fake_client.get.return_value = _fake_models_response()
-        fake_client.post.return_value = _fake_chat_response(json.dumps(payload))
+        _install_streaming_post_mock(fake_client, json.dumps(payload))
         with patch.object(analyzer, "_get_client", return_value=fake_client):
             result = analyzer.analyze(small_transcript, title="IA 101", language="fr")
 
@@ -205,7 +246,7 @@ class TestSingleShotAnalyze:
         }
         fake_client = MagicMock()
         fake_client.get.return_value = _fake_models_response()
-        fake_client.post.return_value = _fake_chat_response(json.dumps(payload))
+        _install_streaming_post_mock(fake_client, json.dumps(payload))
         with patch.object(analyzer, "_get_client", return_value=fake_client):
             result = analyzer.analyze(small_transcript, language="fr")
         assert result.quotes[0].text == "une citation littérale"
@@ -217,7 +258,7 @@ class TestSingleShotAnalyze:
         fenced = f"```json\n{json.dumps(payload)}\n```"
         fake_client = MagicMock()
         fake_client.get.return_value = _fake_models_response()
-        fake_client.post.return_value = _fake_chat_response(fenced)
+        _install_streaming_post_mock(fake_client, fenced)
         with patch.object(analyzer, "_get_client", return_value=fake_client):
             result = analyzer.analyze(small_transcript, language="fr")
         assert result.summary == "x"
@@ -238,10 +279,13 @@ class TestSingleShotAnalyze:
         analyzer = _make_analyzer()
         fake_client = MagicMock()
         fake_client.get.return_value = _fake_models_response()
-        fake_client.post.return_value = _fake_chat_response("not used")
-        fake_client.post.return_value.status_code = 500
-        fake_client.post.return_value.json.side_effect = Exception("no json")
-        fake_client.post.return_value.text = "internal error"
+        # Status 500 — body will be read for the error message.
+        stream_cm = MagicMock()
+        stream_cm.__enter__.return_value = _fake_streaming_response(
+            "not used", status_code=500, error_body="internal error",
+        )
+        stream_cm.__exit__.return_value = False
+        fake_client.stream.return_value = stream_cm
         with patch.object(analyzer, "_get_client", return_value=fake_client):
             with pytest.raises(AnalysisError, match="HTTP 500"):
                 analyzer.analyze(small_transcript)
@@ -267,7 +311,7 @@ class TestChunkAndMerge:
 
         call_count = {"n": 0}
 
-        def fake_chat(user_prompt: str) -> str:
+        def fake_chat(user_prompt: str, **kwargs) -> str:
             call_count["n"] += 1
             # Per-chunk responses
             if "chunk N°" in user_prompt.lower() or "Chunk N°" in user_prompt or \
@@ -303,11 +347,11 @@ class TestChunkAndMerge:
         }
         fake_client = MagicMock()
         fake_client.get.return_value = _fake_models_response()
-        fake_client.post.return_value = _fake_chat_response(json.dumps(payload))
+        _install_streaming_post_mock(fake_client, json.dumps(payload))
         with patch.object(analyzer, "_get_client", return_value=fake_client):
             result = analyzer.analyze(small_transcript, language="fr")
         # Only one HTTP call should have hit /v1/chat/completions.
-        assert fake_client.post.call_count == 1
+        assert fake_client.stream.call_count == 1
         assert result.summary == "ok"
 
 
@@ -369,3 +413,140 @@ class TestDataClasses:
     def test_analysis_result_has_content(self):
         assert AnalysisResult(summary="x").has_content is True
         assert AnalysisResult().has_content is False
+
+
+# ---------------------------------------------------------------------------
+# Streaming SSE + idle timeout
+# ---------------------------------------------------------------------------
+
+class TestStreamingChat:
+    """Verify the streaming + idle-timeout path used in production."""
+
+    def test_stream_deltas_yields_each_token(self, small_transcript):
+        from yt_insight.analyzer.llamacpp_local import (
+            LlamaCppLocalAnalyzer,
+        )
+
+        analyzer = LlamaCppLocalAnalyzer(
+            base_url="http://fake:8080", model="fake",
+            idle_timeout_s=5.0,
+        )
+
+        # 3 SSE events, each with a small delta.
+        sse_lines = [
+            'data: {"choices": [{"delta": {"content": "Hello "}}]}',
+            'data: {"choices": [{"delta": {"content": "world"}}]}',
+            'data: {"choices": [{"delta": {"content": "!"}}]}',
+            "data: [DONE]",
+        ]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.iter_lines.return_value = iter(sse_lines)
+        resp.raise_for_status.return_value = None
+
+        stream_cm = MagicMock()
+        stream_cm.__enter__.return_value = resp
+        stream_cm.__exit__.return_value = False
+        fake_client = MagicMock()
+        fake_client.stream.return_value = stream_cm
+
+        with patch.object(analyzer, "_get_client", return_value=fake_client):
+            tokens = list(analyzer._stream_deltas("hi"))
+
+        assert tokens == ["Hello ", "world", "!"]
+
+    def test_stream_deltas_invokes_on_token_callback(self, small_transcript):
+        analyzer = LlamaCppLocalAnalyzer(
+            base_url="http://fake:8080", model="fake", idle_timeout_s=5.0,
+        )
+
+        sse_lines = [
+            'data: {"choices": [{"delta": {"content": "abc"}}]}',
+            'data: {"choices": [{"delta": {"content": "def"}}]}',
+            "data: [DONE]",
+        ]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.iter_lines.return_value = iter(sse_lines)
+        resp.raise_for_status.return_value = None
+        stream_cm = MagicMock()
+        stream_cm.__enter__.return_value = resp
+        stream_cm.__exit__.return_value = False
+        fake_client = MagicMock()
+        fake_client.stream.return_value = stream_cm
+
+        received: list[str] = []
+        with patch.object(analyzer, "_get_client", return_value=fake_client):
+            for tok in analyzer._stream_deltas("hi", on_token=received.append):
+                pass
+
+        assert received == ["abc", "def"]
+
+    def test_stream_deltas_aborts_on_idle_timeout(self, small_transcript):
+        from yt_insight.analyzer.llamacpp_local import (
+            AnalysisError, LlamaCppLocalAnalyzer,
+        )
+
+        analyzer = LlamaCppLocalAnalyzer(
+            base_url="http://fake:8080", model="fake", idle_timeout_s=0.05,
+        )
+
+        # Emit ONE token, then yield a few empty lines with a sleep.
+        # With idle_timeout_s=50ms, the empty lines (which take >50ms
+        # to produce thanks to the sleep) should trigger the abort.
+        def slow_iter():
+            yield 'data: {"choices": [{"delta": {"content": "first"}}]}'
+            # First empty line is fast (still within 50ms).
+            yield ""
+            # Second empty line is slow (>50ms since last token) → timeout.
+            time.sleep(0.1)
+            yield ""
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.iter_lines.side_effect = lambda: slow_iter()
+        resp.raise_for_status.return_value = None
+        stream_cm = MagicMock()
+        stream_cm.__enter__.return_value = resp
+        stream_cm.__exit__.return_value = False
+        fake_client = MagicMock()
+        fake_client.stream.return_value = stream_cm
+
+        with patch.object(analyzer, "_get_client", return_value=fake_client):
+            with pytest.raises(AnalysisError, match="No token received"):
+                list(analyzer._stream_deltas("hi"))
+
+    def test_chat_returns_assembled_string(self, small_transcript):
+        """`_chat()` should still return a single string (joined deltas)."""
+        analyzer = LlamaCppLocalAnalyzer(
+            base_url="http://fake:8080", model="fake", idle_timeout_s=5.0,
+        )
+
+        sse_lines = [
+            'data: {"choices": [{"delta": {"content": "abc"}}]}',
+            'data: {"choices": [{"delta": {"content": "def"}}]}',
+            "data: [DONE]",
+        ]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.iter_lines.return_value = iter(sse_lines)
+        resp.raise_for_status.return_value = None
+        stream_cm = MagicMock()
+        stream_cm.__enter__.return_value = resp
+        stream_cm.__exit__.return_value = False
+        fake_client = MagicMock()
+        fake_client.stream.return_value = stream_cm
+
+        with patch.object(analyzer, "_get_client", return_value=fake_client):
+            result = analyzer._chat("hi")
+        assert result == "abcdef"
+
+    def test_default_idle_timeout_is_120s(self):
+        from yt_insight.analyzer.llamacpp_local import DEFAULT_IDLE_TIMEOUT_S
+        a = create_analyzer()
+        assert a.idle_timeout_s == DEFAULT_IDLE_TIMEOUT_S == 120.0
+
+    def test_idle_timeout_env_var(self, monkeypatch):
+        monkeypatch.setenv("LLAMACPP_IDLE_TIMEOUT_S", "60")
+        a = create_analyzer()
+        assert a.idle_timeout_s == 60.0

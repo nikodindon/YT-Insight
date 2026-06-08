@@ -37,7 +37,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 # httpx is the only third-party dep of this module. Expose it at
 # module level so tests can patch
@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_MODEL = "Qwen3.6-35B-A3B-UD-IQ3_S.gguf"
 DEFAULT_TIMEOUT_S = 1800.0         # 30 min — long enough for 1h chunk+merge
+DEFAULT_IDLE_TIMEOUT_S = 120.0     # 2 min — abort if no token arrives
 DEFAULT_MAX_PROMPT_TOKENS = 28_000 # safe under llama.cpp's 32k default ctx
 DEFAULT_CHUNK_OVERLAP_TOKENS = 200
 DEFAULT_TEMPERATURE = 0.2          # low for structured JSON
@@ -167,6 +168,11 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         Whether to pass ``chat_template_kwargs={"enable_thinking":
         false}``. Strongly recommended for Qwen3 to get concise,
         direct answers.
+    idle_timeout_s:
+        Maximum number of seconds we wait between two tokens before
+        aborting the stream with an :class:`AnalysisError`. Catches
+        "stuck" generations (network blips, server GC pauses, token
+        stalls) that wall-clock timeouts miss.
     system_prompt:
         Override the default system prompt. Must remain JSON-strict.
     """
@@ -182,11 +188,13 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         disable_thinking: bool = True,
+        idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
         system_prompt: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self._model = model
         self.timeout_s = timeout_s
+        self.idle_timeout_s = idle_timeout_s
         self.max_prompt_tokens = max_prompt_tokens
         self.chunk_overlap_tokens = chunk_overlap_tokens
         self.temperature = temperature
@@ -260,11 +268,20 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         *,
         title: str = "",
         language: str | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> AnalysisResult:
         """
         Run the full analysis pipeline on *transcription*.
 
         See :meth:`BaseAnalyzer.analyze` for the contract.
+
+        Parameters
+        ----------
+        on_token:
+            Optional callback invoked with every text delta as it
+            arrives from the LLM. Useful for live console display
+            (e.g. Rich ``Live`` in the CLI). Has no effect on the
+            returned :class:`AnalysisResult`.
         """
         # Resolve the actual model name once (and check the server is up).
         self._ensure_server_ready()
@@ -284,6 +301,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
             payload = self._single_shot(
                 clean_text, title=title, language=lang_label,
                 duration=transcription.duration_str,
+                on_token=on_token,
             )
         else:
             logger.info(
@@ -294,6 +312,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                 title=title,
                 duration=transcription.duration_str,
                 language=lang_label,
+                on_token=on_token,
             )
 
         result = self._build_result(payload)
@@ -369,11 +388,12 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         title: str,
         duration: str,
         language: str,
+        on_token: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         user_prompt = prompts.build_analysis_prompt(
             text, title=title, duration=duration, language=language,
         )
-        content = self._chat(user_prompt)
+        content = self._chat(user_prompt, on_token=on_token)
         return _extract_json_object(content)
 
     # ------------------------------------------------------------------
@@ -387,6 +407,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         title: str,
         duration: str,
         language: str,
+        on_token: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         # Use overlap = max(overlap, 5% of max_prompt_tokens) for long
         # transcripts, so the model still has cross-chunk context.
@@ -411,7 +432,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                 duration=duration,
                 language=language,
             )
-            content = self._chat(user_prompt)
+            content = self._chat(user_prompt, on_token=on_token)
             # Keep the raw JSON blob for the merge prompt; we don't
             # validate it here, only the final merge output.
             partial_payloads.append(content)
@@ -420,15 +441,15 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         merge_prompt = prompts.build_merge_prompt(
             partial_payloads, title=title, duration=duration, language=language,
         )
-        merged = self._chat(merge_prompt)
+        merged = self._chat(merge_prompt, on_token=on_token)
         return _extract_json_object(merged)
 
     # ------------------------------------------------------------------
-    # HTTP call
+    # HTTP call (streaming with idle timeout)
     # ------------------------------------------------------------------
 
-    def _chat(self, user_prompt: str) -> str:
-        """Send *user_prompt* to the server and return the assistant text."""
+    def _build_payload(self, user_prompt: str, stream: bool) -> dict:
+        """Build the JSON payload for the chat completion endpoint."""
         payload = {
             "model": self._resolved_model or self._model,
             "messages": [
@@ -437,73 +458,62 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
             ],
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "stream": False,
+            "stream": stream,
         }
         if self.disable_thinking:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        return payload
 
-        client = self._get_client()
-        try:
-            resp = client.post("/v1/chat/completions", json=payload)
-        except Exception as exc:
-            if httpx is not None and isinstance(exc, httpx.HTTPError):
-                raise AnalysisError(
-                    f"HTTP error talking to {self.base_url}/v1/chat/completions: {exc}"
-                ) from exc
-            raise AnalysisError(
-                f"HTTP error talking to {self.base_url}/v1/chat/completions: {exc}"
-            ) from exc
-
-        if resp.status_code >= 400:
-            # Try to extract the server's error message.
-            try:
-                err = resp.json()
-            except Exception:
-                err = {"error": resp.text[:500]}
-            raise AnalysisError(
-                f"llama-server returned HTTP {resp.status_code}: {err}"
-            )
-
-        data = resp.json()
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise AnalysisError(
-                f"Malformed response from llama-server: {data!r}"
-            ) from exc
-
-    def stream_chat(self, user_prompt: str) -> Iterator[str]:
+    def _stream_deltas(
+        self,
+        user_prompt: str,
+        on_token: Callable[[str], None] | None = None,
+    ) -> Iterator[str]:
         """
-        Streaming variant of :meth:`_chat` — yields text chunks as they
-        arrive. Useful for the CLI's Rich live display. The caller is
-        responsible for reassembling the chunks into a single string
-        before calling :func:`_extract_json_object`.
-        """
-        payload = {
-            "model": self._resolved_model or self._model,
-            "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "stream": True,
-        }
-        if self.disable_thinking:
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        Internal generator: yield every text delta from the server.
 
+        Streams the response (always — even for ``_chat()`` which just
+        joins the results), with an **idle timeout** between tokens
+        (``self.idle_timeout_s``). Raises :class:`AnalysisError` if the
+        server stops sending tokens for too long.
+
+        Parameters
+        ----------
+        user_prompt:
+            The user's message content.
+        on_token:
+            Optional callback invoked with each delta as it arrives.
+            Use this to drive a live console display.
+        """
+        payload = self._build_payload(user_prompt, stream=True)
         client = self._get_client()
         try:
             with client.stream("POST", "/v1/chat/completions", json=payload) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    # Read body for error message then raise.
+                    body = resp.read().decode("utf-8", errors="replace")[:500]
+                    raise AnalysisError(
+                        f"llama-server returned HTTP {resp.status_code}: {body}"
+                    )
+                last_token_at = time.time()
                 for line in resp.iter_lines():
+                    # Idle check on EVERY line read (not just data lines).
+                    # This catches the case where the server is silent
+                    # but keeps the socket open (e.g. stuck generation).
+                    now = time.time()
+                    if now - last_token_at > self.idle_timeout_s:
+                        raise AnalysisError(
+                            f"No token received for {int(now - last_token_at)}s "
+                            f"(idle_timeout_s={self.idle_timeout_s}) — model "
+                            f"appears stuck. Aborting."
+                        )
                     if not line or not line.startswith("data:"):
                         continue
-                    chunk = line[len("data:"):].strip()
-                    if chunk == "[DONE]":
+                    raw = line[len("data:"):].strip()
+                    if raw == "[DONE]":
                         break
                     try:
-                        evt = json.loads(chunk)
+                        evt = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
                     delta = (
@@ -512,7 +522,12 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                            .get("content")
                     )
                     if delta:
+                        last_token_at = time.time()
+                        if on_token is not None:
+                            on_token(delta)
                         yield delta
+        except AnalysisError:
+            raise
         except Exception as exc:
             if httpx is not None and isinstance(exc, httpx.HTTPError):
                 raise AnalysisError(
@@ -521,6 +536,32 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
             raise AnalysisError(
                 f"Streaming HTTP error from {self.base_url}: {exc}"
             ) from exc
+
+    def _chat(
+        self,
+        user_prompt: str,
+        on_token: Callable[[str], None] | None = None,
+    ) -> str:
+        """Send *user_prompt* to the server and return the assistant text.
+
+        Implementation note: this now goes through the streaming path
+        internally so it benefits from the idle-timeout safeguard. The
+        public contract is unchanged: it still returns a single string.
+        """
+        return "".join(self._stream_deltas(user_prompt, on_token=on_token))
+
+    def stream_chat(
+        self,
+        user_prompt: str,
+        on_token: Callable[[str], None] | None = None,
+    ) -> Iterator[str]:
+        """
+        Streaming variant of :meth:`_chat` — yields text chunks as they
+        arrive. Useful for the CLI's Rich live display. The caller is
+        responsible for reassembling the chunks into a single string
+        before calling :func:`_extract_json_object`.
+        """
+        yield from self._stream_deltas(user_prompt, on_token=on_token)
 
     # ------------------------------------------------------------------
     # Result builder
@@ -590,6 +631,7 @@ def create_analyzer(
     base_url: str | None = None,
     model: str | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
     max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
     chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
     temperature: float = DEFAULT_TEMPERATURE,
@@ -603,6 +645,7 @@ def create_analyzer(
     - ``LLAMACPP_BASE_URL``            → ``base_url``
     - ``LLAMACPP_MODEL``               → ``model``
     - ``LLAMACPP_TIMEOUT_S``           → ``timeout_s``
+    - ``LLAMACPP_IDLE_TIMEOUT_S``      → ``idle_timeout_s`` (per-token, default 120s)
     - ``LLAMACPP_MAX_PROMPT_TOKENS``   → ``max_prompt_tokens``
     - ``LLAMACPP_CHUNK_OVERLAP_TOKENS``→ ``chunk_overlap_tokens``
     - ``LLAMACPP_TEMPERATURE``         → ``temperature``
@@ -643,6 +686,7 @@ def create_analyzer(
         base_url=base_url or _env_str("LLAMACPP_BASE_URL", DEFAULT_BASE_URL),
         model=model or _env_str("LLAMACPP_MODEL", DEFAULT_MODEL),
         timeout_s=_env_float("LLAMACPP_TIMEOUT_S", timeout_s),
+        idle_timeout_s=_env_float("LLAMACPP_IDLE_TIMEOUT_S", idle_timeout_s),
         max_prompt_tokens=_env_int("LLAMACPP_MAX_PROMPT_TOKENS", max_prompt_tokens),
         chunk_overlap_tokens=_env_int(
             "LLAMACPP_CHUNK_OVERLAP_TOKENS", chunk_overlap_tokens
