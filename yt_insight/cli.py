@@ -188,14 +188,27 @@ def _run_analyze_with_live(
         if len(str(state["buffer"])) > 1200:  # type: ignore[arg-type]
             state["buffer"] = "…" + str(state["buffer"])[-1000:]  # type: ignore[assignment]
 
-    def make_panel() -> Panel:
+    def make_panel() -> Panel | Text:
+        """
+        Build the live panel, or an empty Text if no tokens have arrived
+        yet (Rich's ``Live`` draws an empty panel on entry otherwise,
+        producing the visible "ghost" duplicate the user complained
+        about).
+        """
+        buffer = str(state["buffer"])  # type: ignore[arg-type]
         elapsed = time.time() - float(state["t0"])  # type: ignore[arg-type]
-        body = Text(str(state["buffer"]), style="bright_white")  # type: ignore[arg-type]
         footer = Text(
             f" {int(state['chars'])} chars · {int(state['tokens'])} tokens · "  # type: ignore[arg-type]
             f"{elapsed:.1f}s ",
             style="dim cyan",
         )
+        if not buffer:
+            # Empty buffer → return a vertical-fill Text that the Live
+            # block sizes to the right dimensions but draws nothing
+            # visible. This avoids the "empty frame" ghost panel that
+            # appears on the first render.
+            return Text("\n\n  …waiting for first token…\n", style="dim")
+        body = Text(buffer, style="bright_white")
         return Panel(
             body,
             title="[bold magenta]LLM generation[/]",
