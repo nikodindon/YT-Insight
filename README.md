@@ -42,14 +42,16 @@ Chaque étape est modulaire, testable indépendamment, et configurable pour tour
 
 ## État d'avancement
 
-| Module | Fichiers | Tests | Statut |
-|--------|----------|-------|--------|
-| **Downloader** | `downloader/ytdlp_downloader.py` | 12 ✅ | **Terminé** |
-| **Transcriber** | `transcriber/base.py`, `transcriber/faster_whisper_transcriber.py` | 26 ✅ | **Terminé** |
-| **Analyzer** | `analyzer/ollama_local.py` + prompts | — | 🔜 À venir |
-| **Output** | `output/console.py`, `file_writer.py` | — | 🔜 À venir |
-| **CLI** | `cli.py` | — | 🔜 À venir |
-| **Utils** | `utils/config.py`, `text_utils.py` | — | 🔜 À venir |
+| Module      | Fichiers                                            | Tests   | Statut        |
+|-------------|-----------------------------------------------------|---------|---------------|
+| **Downloader**  | `downloader/ytdlp_downloader.py`                | 16 ✅   | **Terminé**   |
+| **Transcriber** | `transcriber/base.py`, `faster_whisper_transcriber.py` | 42 ✅ | **Terminé**   |
+| **Analyzer**    | `analyzer/{base,prompts,llamacpp_local}.py`     | 25 ✅   | **Terminé**   |
+| **Utils**       | `utils/text_utils.py`                           | 19 ✅   | **Terminé**   |
+| **Output**      | `output/console.py`, `file_writer.py`           | —       | 🔜 À venir    |
+| **CLI**         | `cli.py` (placeholder)                          | —       | 🔜 À venir    |
+
+Total : **102 tests passent** (`pytest tests/ -q`).
 
 ---
 
@@ -76,11 +78,10 @@ Chaque étape est modulaire, testable indépendamment, et configurable pour tour
 │                                      │  └──────────────────┘  │   │
 │                                      │                        │   │
 │                                      │  Backends disponibles: │   │
-│                                      │  • Ollama local        │   │
-│                                      │    (Qwen3 35B)         │   │
-│                                      │  • Ollama Cloud        │   │
-│                                      │  • MiniMax API         │   │
-│                                      │  • Claude API          │   │
+│                                      │  • llama.cpp local      │   │
+│                                      │    (Qwen3.6 35B-A3B)    │   │
+│                                      │    via API OpenAI-compat │   │
+│                                      │  • Futurs: ollama, vLLM │   │
 │                                      └───────────┬────────────┘   │
 │                                                  │                │
 │                                                  ▼                │
@@ -119,8 +120,8 @@ User         CLI          Downloader    Transcriber      LLM           Output
 |-----------|-------------|--------------|-----------------|
 | **Download audio** | `yt-dlp` | pytube, youtube-dl | Actif, fiable, formats flexibles |
 | **Transcription** | `faster-whisper` (large-v3) | whisper.cpp, Vosk | CUDA int8, parfait GTX 1650 Super |
-| **LLM local** | `Ollama` + Qwen3 35B Q4 | llama.cpp direct | Déjà opérationnel sur ta machine |
-| **LLM cloud** | `MiniMax API` / `Ollama Cloud` | Claude API, OpenAI | Contexte 1M tokens (MiniMax), flexibilité |
+| **LLM local** | `llama-server` (llama.cpp) + Qwen3.6 35B-A3B | Ollama, vLLM | Tourne déjà sur ta machine sur :8080, API OpenAI-compat |
+| **HTTP client** | `httpx` | requests, aiohttp | Sync + async, timeouts propres, simple |
 | **CLI** | `Rich` + `Typer` | Click, argparse | Beau rendu terminal, progress bars |
 | **Config** | `python-dotenv` + YAML | TOML, INI | Standard, lisible |
 | **Tests** | `pytest` | unittest | Écosystème standard |
@@ -133,11 +134,13 @@ User         CLI          Downloader    Transcriber      LLM           Output
 - Support CUDA natif sous Linux
 - Sortie avec **timestamps** par segment (utile pour navigation)
 
-### Pourquoi MiniMax pour le cloud ?
+### Pourquoi llama.cpp en local ?
 
-- Contexte de **1 million de tokens** → peut ingérer des transcriptions de plusieurs heures
-- Bon rapport qualité/prix
-- API compatible style OpenAI (facile à intégrer)
+- Tourne déjà sur ta machine (`llama-server` sur :8080) avec Qwen3.6 35B-A3B
+- **Contrôle total** sur les flags : offload GPU (`-ngl 99`), CPU offload des experts MoE (`--n-cpu-moe`), quantization du KV cache (`-ctk q4_0 -ctv q4_0`)
+- **API OpenAI-compatible** : `/v1/chat/completions`, `/v1/models`, streaming natif
+- Pas de couche intermédiaire (Ollama) à configurer — le GGUF est chargé directement
+- Fonctionne aussi avec Ollama, vLLM, LM Studio : il suffit de changer `LLAMACPP_BASE_URL`
 
 ---
 
@@ -154,11 +157,11 @@ yt-insight/
 ├── config.yaml                    🔜 à créer
 │
 ├── yt_insight/                    # Package principal
-│   ├── __init__.py                ✅ créé  (version 0.1.0)
-│   ├── cli.py                     🔜 à créer  (Typer + Rich)
+│   ├── __init__.py                ✅ version 0.1.0
+│   ├── cli.py                     🔜 placeholder Typer (commande `version`)
 │   │
 │   ├── downloader/                ✅ MODULE TERMINÉ
-│   │   ├── __init__.py            ✅ expose YtDlpDownloader, DownloadResult
+│   │   ├── __init__.py            ✅ expose YtDlpDownloader, DownloadResult, VideoMetadata, DownloadError
 │   │   └── ytdlp_downloader.py    ✅ implémentation complète
 │   │
 │   ├── transcriber/               ✅ MODULE TERMINÉ
@@ -166,30 +169,29 @@ yt-insight/
 │   │   ├── base.py                ✅ dataclasses Segment + TranscriptionResult, classe abstraite BaseTranscriber
 │   │   └── faster_whisper_transcriber.py  ✅ implémentation complète + factory create_transcriber()
 │   │
-│   ├── analyzer/                  🔜 module 3
-│   │   ├── __init__.py
-│   │   ├── base.py                # Classe abstraite Analyzer
-│   │   ├── prompts.py             # Tous les prompts LLM
-│   │   ├── ollama_local.py        # Backend Ollama local
-│   │   ├── ollama_cloud.py        # Backend Ollama Cloud
-│   │   └── minimax.py             # Backend MiniMax API
+│   ├── analyzer/                  ✅ MODULE TERMINÉ
+│   │   ├── __init__.py            ✅ expose BaseAnalyzer, AnalysisResult, Quote, LlamaCppLocalAnalyzer, create_analyzer
+│   │   ├── base.py                ✅ ABC + dataclasses AnalysisResult / Quote
+│   │   ├── prompts.py             ✅ System + analysis + chunk + merge prompts (FR)
+│   │   └── llamacpp_local.py      ✅ Backend llama.cpp via /v1/chat/completions + chunk+merge + streaming
 │   │
-│   ├── output/                    🔜 module 4
+│   ├── output/                    🔜 module 5
 │   │   ├── __init__.py
 │   │   ├── console.py             # Rendu Rich terminal
 │   │   └── file_writer.py         # Export Markdown / JSON
 │   │
-│   └── utils/                     🔜 module 4
-│       ├── __init__.py
-│       ├── config.py              # Chargement config & env
-│       ├── logger.py              # Logging structuré
-│       └── text_utils.py          # Chunking, nettoyage texte
+│   └── utils/                     ✅ PARTIELLEMENT TERMINÉ
+│       ├── __init__.py            ✅ expose chunk_text, clean_transcript, estimate_tokens, format_transcript_with_timestamps
+│       ├── text_utils.py          ✅ chunking intelligent, estimation tokens, nettoyage
+│       ├── config.py              🔜 Chargement config & env
+│       └── logger.py              🔜 Logging structuré
 │
 ├── tests/
 │   ├── __init__.py                ✅ créé
-│   ├── test_downloader.py         ✅ créé  (12 tests)
-│   ├── test_transcriber.py        ✅ créé  (26 tests)
-│   ├── test_analyzer.py           🔜 à créer
+│   ├── test_downloader.py         ✅ créé  (16 tests)
+│   ├── test_transcriber.py        ✅ créé  (42 tests)
+│   ├── test_analyzer.py           ✅ créé  (25 tests)
+│   ├── test_text_utils.py         ✅ créé  (19 tests)
 │   └── fixtures/
 │       └── sample_transcript.txt  🔜 à créer
 │
@@ -213,9 +215,16 @@ sudo apt update && sudo apt install ffmpeg -y
 # Vérifier la version Python (3.10+ recommandé)
 python3 --version
 
-# Ollama doit être installé et en cours d'exécution
-ollama serve  # dans un terminal séparé
-ollama pull qwen3:35b  # si pas déjà fait
+# llama.cpp doit être compilé (ou installé) et llama-server lancé.
+# Exemple (depuis ~/llama.cpp) :
+~/llama.cpp/build/bin/llama-server \
+    -m /home/niko/models/Qwen3.6-35B-A3B-UD-IQ3_S.gguf \
+    -ngl 99 --n-cpu-moe 34 -t 6 -ctk q4_0 -ctv q4_0 \
+    --port 8080 --host 0.0.0.0
+
+# Vérifier que le serveur répond :
+curl http://localhost:8080/health
+# → {"status":"ok"}
 ```
 
 ### Installation du projet
@@ -264,30 +273,36 @@ cp .env.example .env
 Contenu de `.env` :
 
 ```dotenv
-# === LLM Backend (local | ollama_cloud | minimax | claude) ===
-LLM_BACKEND=local
-
-# === Ollama local ===
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=qwen3:35b
-
-# === Ollama Cloud ===
-OLLAMA_CLOUD_API_KEY=ta_cle_ici
-OLLAMA_CLOUD_MODEL=qwen3:35b
-
-# === MiniMax ===
-MINIMAX_API_KEY=ta_cle_ici
-MINIMAX_MODEL=MiniMax-Text-01
-MINIMAX_GROUP_ID=ton_group_id
-
-# === Claude (optionnel) ===
-ANTHROPIC_API_KEY=ta_cle_ici
-
 # === Whisper ===
 WHISPER_MODEL=large-v3
 WHISPER_DEVICE=cuda          # cuda | cpu
 WHISPER_COMPUTE_TYPE=int8    # int8 | float16 | float32
 WHISPER_LANGUAGE=            # Laisser vide pour auto-détection
+
+# === LLM Backend ===
+# Currently only one backend is implemented: llamacpp-local.
+LLM_BACKEND=llamacpp_local
+
+# === llama.cpp (llama-server) ===
+# Par défaut : llama-server sur :8080, API OpenAI-compat.
+# N'importe quel serveur compatible OpenAI fonctionne (Ollama, vLLM, LM Studio…).
+LLAMACPP_BASE_URL=http://localhost:8080
+LLAMACPP_MODEL=Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+
+# Timeout HTTP en secondes (chunk+merge sur vidéo longue peut prendre plusieurs minutes)
+LLAMACPP_TIMEOUT_S=600
+
+# Seuil de tokens au-delà duquel on passe en chunk+merge.
+# Doit rester bien sous n_ctx du serveur (32k pour le GGUF par défaut).
+LLAMACPP_MAX_PROMPT_TOKENS=28000
+LLAMACPP_CHUNK_OVERLAP_TOKENS=200
+
+LLAMACPP_TEMPERATURE=0.2
+LLAMACPP_MAX_TOKENS=4000
+
+# Désactive le mode "thinking" de Qwen3 (recommandé pour JSON structuré).
+# 0 = activer thinking (plus lent, plus verbeux).
+LLAMACPP_DISABLE_THINKING=1
 
 # === Chemins ===
 OUTPUT_DIR=./outputs
@@ -344,6 +359,9 @@ output:
 
 ## Utilisation
 
+> **Prérequis :** `llama-server` doit tourner sur :8080 (cf. section Installation).
+> Sinon, lance-le dans un terminal séparé avant d'utiliser `yt-insight`.
+
 ### Commande de base
 
 ```bash
@@ -353,8 +371,11 @@ yt-insight "https://www.youtube.com/watch?v=VIDEO_ID"
 # Spécifier la langue (gain de vitesse Whisper)
 yt-insight "https://youtube.com/watch?v=VIDEO_ID" --language fr
 
-# Utiliser le backend cloud MiniMax
-yt-insight "https://youtube.com/watch?v=VIDEO_ID" --backend minimax
+# Utiliser un autre serveur llama.cpp (ex: GPU distant)
+yt-insight "https://youtube.com/watch?v=VIDEO_ID" --llamacpp-url http://gpu:8080
+
+# Utiliser un modèle différent
+yt-insight "https://youtube.com/watch?v=VIDEO_ID" --llamacpp-model other-model.gguf
 
 # Sauvegarder dans un dossier spécifique
 yt-insight "https://youtube.com/watch?v=VIDEO_ID" --output-dir ~/analyses/
@@ -365,7 +386,7 @@ yt-insight "https://youtube.com/watch?v=VIDEO_ID" --steps download,transcribe
 # Analyser une transcription existante (skip download + transcription)
 yt-insight --transcript-file ./outputs/ma_transcription.txt
 
-# Mode verbeux
+# Activer le mode verbose (logs détaillés)
 yt-insight "https://youtube.com/watch?v=VIDEO_ID" --verbose
 ```
 
@@ -388,7 +409,7 @@ yt-insight "https://youtube.com/watch?v=VIDEO_ID" --verbose
   ✓ Segments       : 847
   ✓ Tokens estimés : 18,432
 
-🤖 Analyse LLM (Ollama local · qwen3:35b)...
+🤖 Analyse LLM (llama.cpp · Qwen3.6 35B-A3B)...
   ✓ Résumé généré
   ✓ Points clés extraits (12 points)
   ✓ Analyse approfondie générée
@@ -607,38 +628,113 @@ TestCreateTranscriber  — 3 tests  (defaults, env vars, langue vide)
 
 ---
 
-### `analyzer/prompts.py`
+### `analyzer/base.py`
 
-Contient tous les prompts système et utilisateur, versionnés et modifiables sans toucher au code :
+Classes exposées :
 
+**`Quote`** — une citation notable extraite du transcript :
 ```python
-SYSTEM_PROMPT = """
-Tu es un expert en analyse de contenu vidéo. Tu reçois la transcription complète
-d'une vidéo YouTube et tu dois produire une analyse structurée, précise et utile.
-Réponds toujours en JSON valide avec les clés définies.
-"""
-
-SUMMARY_PROMPT = """
-À partir de cette transcription, génère un résumé intégral et détaillé qui :
-- Couvre l'ensemble du contenu sans omission majeure
-- Respecte la structure et la progression de la vidéo
-- Est rédigé en prose claire et structurée (500-1000 mots)
-- Mentionne les exemples concrets donnés
-...
-"""
+@dataclass
+class Quote:
+    text: str
+    timestamp_seconds: float | None = None
+    speaker: str | None = None
+    # propriété calculée : .timestamp_str → "1:23:45" ou None
+    # méthode : .to_dict() — sérialisable JSON
 ```
+
+**`AnalysisResult`** — tout ce que produit l'analyzer :
+```python
+result.summary              # résumé détaillé, 500-1000 mots
+result.key_points           # list[str] de 8 à 15 affirmations
+result.analysis             # analyse en Markdown (Forces / Concepts / Implications)
+result.quotes               # list[Quote] avec timestamps
+result.topic                # "Intelligence Artificielle"
+result.tone                 # "pédagogique"
+result.audience             # "développeurs Python"
+result.model_name           # "Qwen3.6-35B-A3B-UD-IQ3_S.gguf"
+result.backend              # "llamacpp-local"
+
+result.has_content          # True si au moins un champ est rempli
+result.to_dict()            # sérialisable JSON
+```
+
+**`BaseAnalyzer`** — ABC, contrat que tout backend doit respecter (`analyze()`, `model_name`, `backend_name`, `close()`).
 
 ---
 
-### `analyzer/ollama_local.py`
+### `analyzer/prompts.py`
 
-- Communique avec l'API REST Ollama locale (`http://localhost:11434`)
-- Gère le streaming des réponses pour affichage en temps réel
-- Implémente la stratégie de **chunking** si la transcription dépasse la fenêtre de contexte :
-  - Découpe la transcription en chunks avec overlap
-  - Génère un résumé intermédiaire par chunk
-  - Fusionne les résumés intermédiaires en une analyse finale
-- Gère l'**offload CPU** de Qwen3 35B (déjà configuré sur ta machine)
+Tous les prompts sont versionnés dans un module dédié, modifiables sans toucher au code :
+
+```python
+SYSTEM_PROMPT   # Règles absolues : JSON strict, pas d'invention, langue de la transcription
+ANALYSIS_PROMPT # Prompt principal single-shot (résumé + key_points + analysis + quotes + topic/tone/audience)
+CHUNK_PROMPT    # Prompt allégé pour un extrait (utilisé en mode chunk+merge)
+MERGE_PROMPT    # Prompt de fusion des résumés partiels en un résultat final
+```
+
+Trois helpers de formatage : `build_analysis_prompt()`, `build_chunk_prompt()`, `build_merge_prompt()`.
+
+---
+
+### `analyzer/llamacpp_local.py` ✅
+
+**Statut : terminé et testé.**
+
+#### Pourquoi llama.cpp et pas Ollama ?
+
+Tu lances `llama-server` directement avec ton quant Qwen3.6 35B-A3B sur :8080, donc on parle directement à son **API OpenAI-compatible** (`/v1/chat/completions`, `/v1/models`). Avantages :
+- Pas de couche intermédiaire (Ollama) à configurer
+- Contrôle total sur les flags llama.cpp (`-ngl`, `--n-cpu-moe`, KV cache quant, etc.)
+- Le backend marche aussi avec Ollama, vLLM, LM Studio — il suffit de changer `LLAMACPP_BASE_URL`
+
+#### Classes exposées
+
+**`LlamaCppLocalAnalyzer`** — le backend principal :
+```python
+from yt_insight.analyzer import LlamaCppLocalAnalyzer
+
+a = LlamaCppLocalAnalyzer(
+    base_url="http://localhost:8080",
+    model="Qwen3.6-35B-A3B-UD-IQ3_S.gguf",
+    max_prompt_tokens=28_000,   # sous n_ctx=32k
+    temperature=0.2,
+    max_tokens=4_000,
+    disable_thinking=True,      # crucial pour Qwen3 : réponses concises
+    timeout_s=600.0,
+)
+result = a.analyze(transcription, title="...", language="fr")
+```
+
+**`create_analyzer()`** — factory qui lit les variables d'environnement `LLAMACPP_*`.
+
+#### Comportements clés
+
+**Handshake au premier appel :** `_ensure_server_ready()` interroge `GET /v1/models`, vérifie que le serveur répond, et résout le nom du modèle (match exact → basename → fallback au premier modèle chargé).
+
+**Désactivation du thinking Qwen3 :** on passe `chat_template_kwargs={"enable_thinking": False}` à chaque requête. Sans ça, le modèle brûle ~1000 tokens de "réflexion" avant la sortie JSON.
+
+**Stratégie single-shot vs chunk+merge :** si la transcription nettoyée tient dans `max_prompt_tokens` (28k par défaut, confortable sous le 32k de ctx llama.cpp), on envoie tout d'un coup. Sinon :
+1. `chunk_text()` découpe la transcription en chunks aux frontières de phrases, avec un overlap configurable
+2. Pour chaque chunk, on demande un JSON partiel (résumé + key_points + quotes)
+3. On envoie tous les JSON partiels au prompt de fusion
+4. Le modèle produit le `AnalysisResult` final
+
+**Extraction JSON tolérante :** `_extract_json_object()` essaie (1) le texte brut, (2) un bloc ```` ```json ... ``` ```, (3) le premier objet `{...}` trouvé. Lève `AnalysisError` si rien ne marche.
+
+**Streaming optionnel :** `analyzer.stream_chat(prompt)` yield les tokens au fur et à mesure, pour affichage Rich live (utilisé par le futur module CLI).
+
+**Tests — `tests/test_analyzer.py` (25 tests) ✅**
+
+```
+TestExtractJsonObject       — 5 tests  (JSON pur, fenced, chatter, garbage, empty)
+TestServerHandshake         — 5 tests  (resolve exact, basename, fallback, conn error, no models)
+TestSingleShotAnalyze       — 5 tests  (result, quotes-as-strings, fenced JSON, empty, HTTP 500)
+TestChunkAndMerge           — 2 tests  (chunk+merge path, single-shot when small)
+TestCreateAnalyzer          — 3 tests  (defaults, env overrides, kwarg beats env)
+TestDataClasses             — 5 tests  (Quote.ts, AnalysisResult.to_dict, has_content)
+```
 
 ---
 
@@ -728,20 +824,19 @@ Fonctions utilitaires :
 ### Phase 1 — MVP (en cours) 🚧
 - [x] Architecture & README
 - [x] `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.env.example`
-- [x] Module downloader — `yt_insight/downloader/ytdlp_downloader.py`
-- [x] Tests downloader — `tests/test_downloader.py` (12 tests)
-- [x] Module transcriber — `yt_insight/transcriber/base.py` + `faster_whisper_transcriber.py`
-- [x] Tests transcriber — `tests/test_transcriber.py` (26 tests)
-- [ ] Module analyzer (Ollama local)
-- [ ] CLI Rich + Typer
-- [ ] Output Markdown + JSON
-- [ ] Configuration `config.yaml` + `utils/config.py`
+- [x] Module downloader — `yt_insight/downloader/ytdlp_downloader.py` (16 tests)
+- [x] Module transcriber — `yt_insight/transcriber/{base,faster_whisper_transcriber}.py` (42 tests)
+- [x] Module analyzer — `yt_insight/analyzer/{base,prompts,llamacpp_local}.py` (25 tests)
+- [x] Module utils — `yt_insight/utils/text_utils.py` (19 tests, chunking + cleanup)
+- [ ] Module output — `output/{console,file_writer}.py` (Markdown + Rich)
+- [ ] CLI Rich + Typer — sous-commandes `download` / `transcribe` / `analyze` / `all`
+- [ ] `utils/config.py` (chargement config.yaml + env)
 
-### Phase 2 — Backends cloud
-- [ ] Intégration MiniMax API
-- [ ] Intégration Ollama Cloud
-- [ ] Intégration Claude API (optionnel)
-- [ ] Sélection automatique du backend selon longueur
+### Phase 2 — Backends supplémentaires
+- [ ] Backend Ollama (même API OpenAI-compat, juste changer `LLAMACPP_BASE_URL`)
+- [ ] Backend vLLM (même chose, déjà compatible)
+- [ ] Sélection automatique du backend selon longueur de la transcription
+- [ ] Mode "transcript brut" (skip l'analyse, garder la transcription seule)
 
 ### Phase 3 — Features avancées
 - [ ] Support playlists YouTube (batch processing)
@@ -752,7 +847,7 @@ Fonctions utilitaires :
 - [ ] Recherche full-text dans les transcriptions
 
 ### Phase 4 — Qualité
-- [ ] Suite de tests complète (pytest)
+- [ ] Suite de tests complète (actuellement 102/102 ✅)
 - [ ] CI/CD GitHub Actions
 - [ ] Dockerisation
 - [ ] Packaging PyPI
@@ -770,10 +865,8 @@ yt-dlp>=2024.1.0
 # Transcription
 faster-whisper>=1.0.0
 
-# LLM backends
-ollama>=0.2.0
-httpx>=0.27.0          # MiniMax API + HTTP générique
-anthropic>=0.25.0      # Optionnel — Claude API
+# LLM analyzer (parle à llama-server sur :8080 via API OpenAI-compat)
+httpx>=0.27.0
 
 # CLI & UI
 typer>=0.12.0

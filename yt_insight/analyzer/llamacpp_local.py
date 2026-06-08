@@ -1,0 +1,678 @@
+"""
+LLM analyzer backend that talks to a locally running ``llama-server``.
+
+The server is the one shipped with llama.cpp (``llama-server``). It
+exposes an OpenAI-compatible HTTP API, so we talk to it via
+``httpx.AsyncClient`` using the standard ``/v1/chat/completions``
+endpoint.
+
+Why not Ollama?
+---------------
+The user runs ``llama-server`` directly (with a custom Qwen3.6 35B-A3B
+UD-IQ3_S quant on port 8080) rather than going through Ollama. The
+HTTP surface is identical though, so this backend could trivially
+target Ollama as well — just point ``base_url`` at its ``/v1`` mount.
+
+Key design decisions
+--------------------
+- **Thinking is disabled.** Qwen3 chat templates default to thinking
+  mode, which burns a lot of tokens for structured analysis tasks.
+  We pass ``chat_template_kwargs={"enable_thinking": false}`` to keep
+  responses concise and predictable.
+- **Single-shot when possible, chunk+merge otherwise.** If the
+  transcript fits in ``max_prompt_tokens`` (default 28k, leaving
+  headroom under llama.cpp's 32k ctx), we send it as one prompt.
+  Otherwise we chunk, summarize per chunk, then run a merge prompt
+  to fuse everything into a single ``AnalysisResult``.
+- **JSON contract.** We always ask the model for a JSON object and
+  parse it leniently. Failures raise :class:`AnalysisError`.
+- **Streaming is optional.** ``stream=True`` lets us yield tokens as
+  they arrive, useful for a Rich live display in the CLI.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterator
+
+# httpx is the only third-party dep of this module. Expose it at
+# module level so tests can patch
+# ``yt_insight.analyzer.llamacpp_local.httpx``. If the package isn't
+# installed we leave a sentinel — the rest of the module still parses.
+httpx = None  # type: ignore
+try:
+    import httpx as _httpx
+    httpx = _httpx
+except ImportError:  # pragma: no cover - exercised only without httpx
+    pass
+
+from ..utils.text_utils import (
+    chunk_text,
+    clean_transcript,
+    estimate_tokens,
+)
+from . import prompts
+from .base import AnalysisResult, BaseAnalyzer, Quote
+
+if TYPE_CHECKING:
+    from yt_insight.transcriber import TranscriptionResult
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+
+DEFAULT_BASE_URL = "http://localhost:8080"
+DEFAULT_MODEL = "Qwen3.6-35B-A3B-UD-IQ3_S.gguf"
+DEFAULT_TIMEOUT_S = 600.0          # big enough for chunk+merge on long videos
+DEFAULT_MAX_PROMPT_TOKENS = 28_000 # safe under llama.cpp's 32k default ctx
+DEFAULT_CHUNK_OVERLAP_TOKENS = 200
+DEFAULT_TEMPERATURE = 0.2          # low for structured JSON
+DEFAULT_MAX_TOKENS = 4096          # big enough for the analysis JSON
+
+
+# ---------------------------------------------------------------------------
+# Custom exception
+# ---------------------------------------------------------------------------
+
+class AnalysisError(Exception):
+    """Raised when the analyzer fails for any reason (HTTP, JSON, etc.)."""
+
+
+# ---------------------------------------------------------------------------
+# JSON extraction
+# ---------------------------------------------------------------------------
+
+#: Match a fenced ```json ... ``` block first, then a bare JSON object.
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_BARE_JSON_RE = re.compile(r"(\{.*\})", re.DOTALL)
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """
+    Find the first JSON object in *text* and parse it.
+
+    The model is asked to reply with a single JSON object only, but
+    sometimes it wraps it in a Markdown code fence or adds a stray
+    sentence. This helper is tolerant.
+    """
+    text = text.strip()
+
+    # 1. Try the full string first (fast path).
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Look for a ```json ... ``` block.
+    fenced = _FENCED_JSON_RE.search(text)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Fall back to "find the outermost { ... }" by trying every
+    #    candidate prefix/suffix.
+    for match in _BARE_JSON_RE.finditer(text):
+        candidate = match.group(1)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    raise AnalysisError(
+        f"Could not extract a JSON object from the model response "
+        f"({len(text)} chars). First 200 chars: {text[:200]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Analyzer
+# ---------------------------------------------------------------------------
+
+class LlamaCppLocalAnalyzer(BaseAnalyzer):
+    """
+    Analyzer that talks to a local ``llama-server`` instance.
+
+    Parameters
+    ----------
+    base_url:
+        Root URL of the llama-server (e.g. ``http://localhost:8080``).
+        The OpenAI-compatible mount is expected at ``{base_url}/v1``.
+    model:
+        Model name as reported by ``GET /v1/models``. Used to populate
+        :attr:`model_name` and to address the right slot on the server.
+    timeout_s:
+        HTTP timeout in seconds. Set generously: a chunk+merge run on
+        a 1-hour video can easily take several minutes.
+    max_prompt_tokens:
+        Soft cap on the number of tokens in the user prompt. If the
+        transcript exceeds this, we switch to chunk+merge.
+    chunk_overlap_tokens:
+        Number of tokens of overlap between consecutive chunks.
+    temperature:
+        Sampling temperature for the model. Low values (0.1-0.3) are
+        recommended for structured JSON outputs.
+    max_tokens:
+        Maximum number of tokens the model is allowed to generate per
+        call.
+    disable_thinking:
+        Whether to pass ``chat_template_kwargs={"enable_thinking":
+        false}``. Strongly recommended for Qwen3 to get concise,
+        direct answers.
+    system_prompt:
+        Override the default system prompt. Must remain JSON-strict.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = DEFAULT_BASE_URL,
+        model: str = DEFAULT_MODEL,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
+        chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        disable_thinking: bool = True,
+        system_prompt: str | None = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self._model = model
+        self.timeout_s = timeout_s
+        self.max_prompt_tokens = max_prompt_tokens
+        self.chunk_overlap_tokens = chunk_overlap_tokens
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.disable_thinking = disable_thinking
+        self.system_prompt = system_prompt or prompts.SYSTEM_PROMPT
+
+        self._client: httpx.Client | None = None
+        # Resolved at first call (after server handshake) — may differ
+        # from ``self._model`` if the user passed a partial alias.
+        self._resolved_model: str | None = None
+
+        logger.info(
+            "LlamaCppLocalAnalyzer configured — url=%s model=%s max_prompt=%d tok",
+            self.base_url, self._model, self.max_prompt_tokens,
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def _get_client(self) -> httpx.Client:
+        if httpx is None:  # pragma: no cover - guarded by factory
+            raise AnalysisError(
+                "httpx is not installed. Run: pip install httpx"
+            )
+        if self._client is None:
+            self._client = httpx.Client(
+                base_url=self.base_url,
+                timeout=httpx.Timeout(self.timeout_s, connect=10.0),
+            )
+        return self._client
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> "LlamaCppLocalAnalyzer":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def model_name(self) -> str:
+        return self._resolved_model or self._model
+
+    @property
+    def backend_name(self) -> str:
+        return "llamacpp-local"
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def analyze(
+        self,
+        transcription: "TranscriptionResult",
+        *,
+        title: str = "",
+        language: str | None = None,
+    ) -> AnalysisResult:
+        """
+        Run the full analysis pipeline on *transcription*.
+
+        See :meth:`BaseAnalyzer.analyze` for the contract.
+        """
+        # Resolve the actual model name once (and check the server is up).
+        self._ensure_server_ready()
+
+        lang_label = _language_label(language or transcription.language)
+        clean_text = clean_transcript(transcription.text)
+        if not clean_text:
+            raise AnalysisError("Transcript is empty after cleanup.")
+
+        t0 = time.time()
+        logger.info(
+            "Analyzing transcript: %d chars, ~%d tokens, lang=%s",
+            len(clean_text), estimate_tokens(clean_text), lang_label,
+        )
+
+        if estimate_tokens(clean_text) <= self.max_prompt_tokens:
+            payload = self._single_shot(
+                clean_text, title=title, language=lang_label,
+                duration=transcription.duration_str,
+            )
+        else:
+            logger.info(
+                "Transcript exceeds max_prompt_tokens — switching to chunk+merge"
+            )
+            payload = self._chunk_and_merge(
+                clean_text,
+                title=title,
+                duration=transcription.duration_str,
+                language=lang_label,
+            )
+
+        result = self._build_result(payload)
+        # Tag the result with the backend + model identity so downstream
+        # code (output writers, console) can label it.
+        result.model_name = self.model_name
+        result.backend = self.backend_name
+        elapsed = time.time() - t0
+        logger.info("Analysis done in %.1fs.", elapsed)
+        return result
+
+    # ------------------------------------------------------------------
+    # Server handshake
+    # ------------------------------------------------------------------
+
+    def _ensure_server_ready(self) -> None:
+        """Check that the server is up and resolve the model name."""
+        if httpx is None:
+            raise AnalysisError(
+                "httpx is not installed. Run: pip install httpx"
+            )
+        client = self._get_client()
+        try:
+            resp = client.get("/v1/models")
+            resp.raise_for_status()
+        except Exception as exc:
+            # httpx.HTTPError covers all transport-level errors. We catch
+            # ``Exception`` so the analyzer works even if httpx is later
+            # swapped for another HTTP library at this seam.
+            if httpx is not None and isinstance(exc, httpx.HTTPError):
+                raise AnalysisError(
+                    f"Could not reach llama-server at {self.base_url}: {exc}"
+                ) from exc
+            raise AnalysisError(
+                f"Could not reach llama-server at {self.base_url}: {exc}"
+            ) from exc
+
+        data = resp.json()
+        models = data.get("data") or data.get("models") or []
+        if not models:
+            raise AnalysisError(
+                f"llama-server at {self.base_url} reports no models. "
+                f"Start it with: llama-server -m your-model.gguf"
+            )
+
+        # Resolve model name: exact match, else first available, else keep as-is.
+        names = [m.get("id") or m.get("name") or "" for m in models]
+        if self._model in names:
+            self._resolved_model = self._model
+        else:
+            # Try a basename match (e.g. user passed "Qwen3.6-35B-A3B" without .gguf).
+            basename = self._model
+            for n in names:
+                if n == basename or n.split(".")[0] == basename.split(".")[0]:
+                    self._resolved_model = n
+                    break
+            if self._resolved_model is None:
+                # Fall back to the first model the server has loaded.
+                self._resolved_model = names[0]
+                logger.warning(
+                    "Model %r not found on server; falling back to %r",
+                    self._model, self._resolved_model,
+                )
+
+    # ------------------------------------------------------------------
+    # Single-shot path
+    # ------------------------------------------------------------------
+
+    def _single_shot(
+        self,
+        text: str,
+        *,
+        title: str,
+        duration: str,
+        language: str,
+    ) -> dict[str, Any]:
+        user_prompt = prompts.build_analysis_prompt(
+            text, title=title, duration=duration, language=language,
+        )
+        content = self._chat(user_prompt)
+        return _extract_json_object(content)
+
+    # ------------------------------------------------------------------
+    # Chunk + merge path
+    # ------------------------------------------------------------------
+
+    def _chunk_and_merge(
+        self,
+        text: str,
+        *,
+        title: str,
+        duration: str,
+        language: str,
+    ) -> dict[str, Any]:
+        # Use overlap = max(overlap, 5% of max_prompt_tokens) for long
+        # transcripts, so the model still has cross-chunk context.
+        overlap = self.chunk_overlap_tokens
+        if estimate_tokens(text) > 2 * self.max_prompt_tokens:
+            overlap = max(overlap, self.max_prompt_tokens // 20)
+
+        chunks = chunk_text(
+            text,
+            max_tokens=self.max_prompt_tokens,
+            overlap_tokens=overlap,
+        )
+        logger.info("Split transcript into %d chunks (overlap=%d tok).", len(chunks), overlap)
+
+        partial_payloads: list[str] = []
+        for i, chunk in enumerate(chunks, start=1):
+            user_prompt = prompts.build_chunk_prompt(
+                chunk,
+                chunk_index=i,
+                chunk_total=len(chunks),
+                title=title,
+                duration=duration,
+                language=language,
+            )
+            content = self._chat(user_prompt)
+            # Keep the raw JSON blob for the merge prompt; we don't
+            # validate it here, only the final merge output.
+            partial_payloads.append(content)
+            logger.info("Chunk %d/%d summarized (%d chars).", i, len(chunks), len(content))
+
+        merge_prompt = prompts.build_merge_prompt(
+            partial_payloads, title=title, duration=duration, language=language,
+        )
+        merged = self._chat(merge_prompt)
+        return _extract_json_object(merged)
+
+    # ------------------------------------------------------------------
+    # HTTP call
+    # ------------------------------------------------------------------
+
+    def _chat(self, user_prompt: str) -> str:
+        """Send *user_prompt* to the server and return the assistant text."""
+        payload = {
+            "model": self._resolved_model or self._model,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        }
+        if self.disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        client = self._get_client()
+        try:
+            resp = client.post("/v1/chat/completions", json=payload)
+        except Exception as exc:
+            if httpx is not None and isinstance(exc, httpx.HTTPError):
+                raise AnalysisError(
+                    f"HTTP error talking to {self.base_url}/v1/chat/completions: {exc}"
+                ) from exc
+            raise AnalysisError(
+                f"HTTP error talking to {self.base_url}/v1/chat/completions: {exc}"
+            ) from exc
+
+        if resp.status_code >= 400:
+            # Try to extract the server's error message.
+            try:
+                err = resp.json()
+            except Exception:
+                err = {"error": resp.text[:500]}
+            raise AnalysisError(
+                f"llama-server returned HTTP {resp.status_code}: {err}"
+            )
+
+        data = resp.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AnalysisError(
+                f"Malformed response from llama-server: {data!r}"
+            ) from exc
+
+    def stream_chat(self, user_prompt: str) -> Iterator[str]:
+        """
+        Streaming variant of :meth:`_chat` — yields text chunks as they
+        arrive. Useful for the CLI's Rich live display. The caller is
+        responsible for reassembling the chunks into a single string
+        before calling :func:`_extract_json_object`.
+        """
+        payload = {
+            "model": self._resolved_model or self._model,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        if self.disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        client = self._get_client()
+        try:
+            with client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    chunk = line[len("data:"):].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        evt = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = (
+                        evt.get("choices", [{}])[0]
+                           .get("delta", {})
+                           .get("content")
+                    )
+                    if delta:
+                        yield delta
+        except Exception as exc:
+            if httpx is not None and isinstance(exc, httpx.HTTPError):
+                raise AnalysisError(
+                    f"Streaming HTTP error from {self.base_url}: {exc}"
+                ) from exc
+            raise AnalysisError(
+                f"Streaming HTTP error from {self.base_url}: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Result builder
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_result(payload: dict[str, Any]) -> AnalysisResult:
+        """Turn a parsed JSON *payload* into an :class:`AnalysisResult`."""
+        summary = _coerce_str(payload.get("summary"))
+        analysis = _coerce_str(payload.get("analysis"))
+        topic = _coerce_str(payload.get("topic"))
+        tone = _coerce_str(payload.get("tone"))
+        audience = _coerce_str(payload.get("audience"))
+
+        key_points_raw = payload.get("key_points") or []
+        if not isinstance(key_points_raw, list):
+            key_points_raw = [str(key_points_raw)]
+        key_points = [str(p).strip() for p in key_points_raw if str(p).strip()]
+
+        quotes_raw = payload.get("quotes") or []
+        if not isinstance(quotes_raw, list):
+            quotes_raw = []
+        quotes: list[Quote] = []
+        for q in quotes_raw:
+            if isinstance(q, str):
+                quotes.append(Quote(text=q.strip()))
+                continue
+            if not isinstance(q, dict):
+                continue
+            text = _coerce_str(q.get("text"))
+            if not text:
+                continue
+            ts = q.get("timestamp_seconds")
+            ts_f: float | None
+            try:
+                ts_f = float(ts) if ts is not None else None
+            except (TypeError, ValueError):
+                ts_f = None
+            speaker = q.get("speaker")
+            quotes.append(
+                Quote(
+                    text=text,
+                    timestamp_seconds=ts_f,
+                    speaker=str(speaker).strip() if speaker else None,
+                )
+            )
+
+        return AnalysisResult(
+            summary=summary,
+            key_points=key_points,
+            analysis=analysis,
+            quotes=quotes,
+            topic=topic,
+            tone=tone,
+            audience=audience,
+            # ``model_name`` and ``backend`` are filled in by the caller
+            # (analyze) using the analyzer's properties.
+        )
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def create_analyzer(
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
+    chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    disable_thinking: bool = True,
+) -> LlamaCppLocalAnalyzer:
+    """
+    Build a :class:`LlamaCppLocalAnalyzer` from env vars + kwargs.
+
+    Environment variables (override only if the matching kwarg is None):
+    - ``LLAMACPP_BASE_URL``            → ``base_url``
+    - ``LLAMACPP_MODEL``               → ``model``
+    - ``LLAMACPP_TIMEOUT_S``           → ``timeout_s``
+    - ``LLAMACPP_MAX_PROMPT_TOKENS``   → ``max_prompt_tokens``
+    - ``LLAMACPP_CHUNK_OVERLAP_TOKENS``→ ``chunk_overlap_tokens``
+    - ``LLAMACPP_TEMPERATURE``         → ``temperature``
+    - ``LLAMACPP_MAX_TOKENS``          → ``max_tokens``
+    - ``LLAMACPP_DISABLE_THINKING``    → ``disable_thinking`` ("1"/"0")
+    """
+    import os
+
+    def _env_str(name: str, default: str) -> str:
+        v = os.getenv(name)
+        return v if v not in (None, "") else default
+
+    def _env_float(name: str, default: float) -> float:
+        v = os.getenv(name)
+        if v in (None, ""):
+            return default
+        try:
+            return float(v)
+        except ValueError:
+            return default
+
+    def _env_int(name: str, default: int) -> int:
+        v = os.getenv(name)
+        if v in (None, ""):
+            return default
+        try:
+            return int(v)
+        except ValueError:
+            return default
+
+    def _env_bool(name: str, default: bool) -> bool:
+        v = os.getenv(name)
+        if v in (None, ""):
+            return default
+        return v.strip().lower() not in ("0", "false", "no", "off")
+
+    return LlamaCppLocalAnalyzer(
+        base_url=base_url or _env_str("LLAMACPP_BASE_URL", DEFAULT_BASE_URL),
+        model=model or _env_str("LLAMACPP_MODEL", DEFAULT_MODEL),
+        timeout_s=_env_float("LLAMACPP_TIMEOUT_S", timeout_s),
+        max_prompt_tokens=_env_int("LLAMACPP_MAX_PROMPT_TOKENS", max_prompt_tokens),
+        chunk_overlap_tokens=_env_int(
+            "LLAMACPP_CHUNK_OVERLAP_TOKENS", chunk_overlap_tokens
+        ),
+        temperature=_env_float("LLAMACPP_TEMPERATURE", temperature),
+        max_tokens=_env_int("LLAMACPP_MAX_TOKENS", max_tokens),
+        disable_thinking=_env_bool("LLAMACPP_DISABLE_THINKING", disable_thinking),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+#: Mapping from ISO 639-1 codes to human-readable language labels used
+#: in the prompts. Extend as needed.
+_LANGUAGE_LABELS: dict[str, str] = {
+    "fr": "français",
+    "en": "english",
+    "es": "español",
+    "de": "deutsch",
+    "it": "italiano",
+    "pt": "português",
+    "nl": "nederlands",
+}
+
+
+def _language_label(code: str | None) -> str:
+    if not code:
+        return "français"
+    return _LANGUAGE_LABELS.get(code.lower(), code)
+
+
+def _coerce_str(value: Any) -> str:
+    """Return *value* as a stripped string, or ``""`` for None / non-strings."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
