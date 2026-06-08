@@ -203,11 +203,14 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         # over explicit temperature/max_tokens unless the user passed
         # non-default values (we keep the user's choice if explicit).
         preset = DEPTH_PRESETS[depth]
-        # If user kept the default temperature, override with preset.
-        if temperature == DEFAULT_TEMPERATURE:
+        # If user kept the default temperature (or didn't pass any),
+        # override with preset. ``None`` from the CLI is treated as
+        # "use the preset" so the depth default is always applied.
+        if temperature is None or temperature == DEFAULT_TEMPERATURE:
             temperature = float(preset["temperature"])  # type: ignore[arg-type]
-        # If user kept the default max_tokens, override with preset.
-        if max_tokens == DEFAULT_MAX_TOKENS:
+        # If user kept the default max_tokens (or didn't pass any),
+        # override with preset.
+        if max_tokens is None or max_tokens == DEFAULT_MAX_TOKENS:
             max_tokens = int(preset["max_tokens"])  # type: ignore[arg-type]
         if sections is None:
             sections = DEPTH_DEFAULT_SECTIONS[depth]
@@ -674,13 +677,13 @@ def create_analyzer(
     *,
     base_url: str | None = None,
     model: str | None = None,
-    timeout_s: float = DEFAULT_TIMEOUT_S,
-    idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
-    max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
-    chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
-    temperature: float = DEFAULT_TEMPERATURE,
-    max_tokens: int = DEFAULT_MAX_TOKENS,
-    disable_thinking: bool = True,
+    timeout_s: float | None = None,
+    idle_timeout_s: float | None = None,
+    max_prompt_tokens: int | None = None,
+    chunk_overlap_tokens: int | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    disable_thinking: bool | None = None,
     depth: "Depth | str | None" = None,
     sections: tuple[str, ...] | list[str] | str | None = None,
 ) -> LlamaCppLocalAnalyzer:
@@ -740,18 +743,49 @@ def create_analyzer(
             return default
         return v.strip().lower() not in ("0", "false", "no", "off")
 
+    def _env_int_or_default(name: str, default: int | None) -> int | None:
+        """Like :func:`_env_int` but returns ``default`` unchanged if it's None."""
+        v = os.getenv(name)
+        if v in (None, ""):
+            return default
+        try:
+            return int(v)
+        except ValueError:
+            return default
+
+    def _env_float_or_default(name: str, default: float | None) -> float | None:
+        v = os.getenv(name)
+        if v in (None, ""):
+            return default
+        try:
+            return float(v)
+        except ValueError:
+            return default
+
+    # ``None`` means "user didn't pass a value, use the kwarg default".
+    # We must convert None to the actual default before forwarding, otherwise
+    # downstream code (e.g. ``logger.info("max_prompt=%d", self.max_prompt_tokens)``)
+    # crashes when the value is None.
+    eff_max_prompt = max_prompt_tokens if max_prompt_tokens is not None else DEFAULT_MAX_PROMPT_TOKENS
+    eff_idle = idle_timeout_s if idle_timeout_s is not None else DEFAULT_IDLE_TIMEOUT_S
+    eff_timeout = timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S
+
     return LlamaCppLocalAnalyzer(
         base_url=base_url or _env_str("LLAMACPP_BASE_URL", DEFAULT_BASE_URL),
         model=model or _env_str("LLAMACPP_MODEL", DEFAULT_MODEL),
-        timeout_s=_env_float("LLAMACPP_TIMEOUT_S", timeout_s),
-        idle_timeout_s=_env_float("LLAMACPP_IDLE_TIMEOUT_S", idle_timeout_s),
-        max_prompt_tokens=_env_int("LLAMACPP_MAX_PROMPT_TOKENS", max_prompt_tokens),
-        chunk_overlap_tokens=_env_int(
+        timeout_s=_env_float_or_default("LLAMACPP_TIMEOUT_S", eff_timeout),
+        idle_timeout_s=_env_float_or_default("LLAMACPP_IDLE_TIMEOUT_S", eff_idle),
+        max_prompt_tokens=_env_int_or_default("LLAMACPP_MAX_PROMPT_TOKENS", eff_max_prompt),
+        chunk_overlap_tokens=_env_int_or_default(
             "LLAMACPP_CHUNK_OVERLAP_TOKENS", chunk_overlap_tokens
         ),
-        temperature=_env_float("LLAMACPP_TEMPERATURE", temperature),
-        max_tokens=_env_int("LLAMACPP_MAX_TOKENS", max_tokens),
-        disable_thinking=_env_bool("LLAMACPP_DISABLE_THINKING", disable_thinking),
+        temperature=_env_float_or_default("LLAMACPP_TEMPERATURE", temperature),
+        max_tokens=_env_int_or_default("LLAMACPP_MAX_TOKENS", max_tokens),
+        disable_thinking=(
+            disable_thinking
+            if disable_thinking is not None
+            else _env_bool("LLAMACPP_DISABLE_THINKING", True)
+        ),
         # Depth + sections: env var overrides None, kwarg wins over env.
         depth=depth if depth is not None else (_env_str("LLAMACPP_DEPTH", "") or None),
         sections=sections if sections is not None else (

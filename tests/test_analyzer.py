@@ -584,3 +584,24 @@ class TestStreamingChat:
         monkeypatch.setenv("LLAMACPP_DEPTH", "deep")
         a = create_analyzer(depth="shallow")
         assert a.depth.value == "shallow"
+
+    def test_create_analyzer_none_kwargs_fall_back_to_defaults(self):
+        """
+        Regression: the CLI passes ``max_prompt_tokens=None`` when the
+        user didn't set ``--llamacpp-max-prompt-tokens``. The factory
+        must convert None to the default, otherwise downstream
+        ``logger.info("max_prompt=%d", self.max_prompt_tokens)``
+        crashes with TypeError: %d format: a real number is required,
+        not NoneType.
+        """
+        a = create_analyzer(
+            base_url="http://x:8080",
+            timeout_s=None,           # → DEFAULT_TIMEOUT_S (7200)
+            idle_timeout_s=None,      # → DEFAULT_IDLE_TIMEOUT_S (600)
+            max_prompt_tokens=None,   # → DEFAULT_MAX_PROMPT_TOKENS (50000)
+            depth="shallow",
+            sections="forces",
+        )
+        assert a.timeout_s == 7200.0
+        assert a.idle_timeout_s == 600.0
+        assert a.max_prompt_tokens == 50000
