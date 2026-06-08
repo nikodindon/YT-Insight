@@ -47,11 +47,11 @@ Chaque étape est modulaire, testable indépendamment, et configurable pour tour
 | **Downloader**  | `downloader/ytdlp_downloader.py`                | 16 ✅   | **Terminé**   |
 | **Transcriber** | `transcriber/base.py`, `faster_whisper_transcriber.py` | 42 ✅ | **Terminé**   |
 | **Analyzer**    | `analyzer/{base,prompts,llamacpp_local}.py`     | 25 ✅   | **Terminé**   |
-| **Utils**       | `utils/text_utils.py`                           | 19 ✅   | **Terminé**   |
-| **Output**      | `output/console.py`, `file_writer.py`           | —       | 🔜 À venir    |
-| **CLI**         | `cli.py` (placeholder)                          | —       | 🔜 À venir    |
+| **Utils**       | `utils/{text_utils,config,logger}.py`           | 41 ✅   | **Terminé**   |
+| **Output**      | `output/{console,file_writer}.py`               | 21 ✅   | **Terminé**   |
+| **CLI**         | `cli.py` (4 sous-commandes Typer)               | 16 ✅   | **Terminé**   |
 
-Total : **102 tests passent** (`pytest tests/ -q`).
+Total : **161 tests passent** (`pytest tests/ -q`).
 
 ---
 
@@ -158,7 +158,7 @@ yt-insight/
 │
 ├── yt_insight/                    # Package principal
 │   ├── __init__.py                ✅ version 0.1.0
-│   ├── cli.py                     🔜 placeholder Typer (commande `version`)
+│   ├── cli.py                     ✅ Typer + Rich : all / download / transcribe / analyze / version
 │   │
 │   ├── downloader/                ✅ MODULE TERMINÉ
 │   │   ├── __init__.py            ✅ expose YtDlpDownloader, DownloadResult, VideoMetadata, DownloadError
@@ -175,16 +175,16 @@ yt-insight/
 │   │   ├── prompts.py             ✅ System + analysis + chunk + merge prompts (FR)
 │   │   └── llamacpp_local.py      ✅ Backend llama.cpp via /v1/chat/completions + chunk+merge + streaming
 │   │
-│   ├── output/                    🔜 module 5
-│   │   ├── __init__.py
-│   │   ├── console.py             # Rendu Rich terminal
-│   │   └── file_writer.py         # Export Markdown / JSON
+│   ├── output/                    ✅ MODULE TERMINÉ
+│   │   ├── __init__.py            ✅ expose ConsoleRenderer, RenderConfig, FileWriter, write_outputs
+│   │   ├── console.py             ✅ rendu Rich terminal (panels, tables, Markdown)
+│   │   └── file_writer.py         ✅ export Markdown (front matter YAML + sections) et JSON structuré
 │   │
-│   └── utils/                     ✅ PARTIELLEMENT TERMINÉ
-│       ├── __init__.py            ✅ expose chunk_text, clean_transcript, estimate_tokens, format_transcript_with_timestamps
-│       ├── text_utils.py          ✅ chunking intelligent, estimation tokens, nettoyage
-│       ├── config.py              🔜 Chargement config & env
-│       └── logger.py              🔜 Logging structuré
+│   └── utils/                     ✅ MODULE TERMINÉ
+│       ├── __init__.py            ✅ expose load_config, AppConfig + sous-configs, setup_logging, chunk_text, etc.
+│       ├── text_utils.py          ✅ chunking intelligent, estimation tokens, nettoyage, formatage timestamps
+│       ├── config.py              ✅ dataclasses typées + load_config() (défauts → YAML → env)
+│       └── logger.py              ✅ setup_logging() idempotent avec RichHandler
 │
 ├── tests/
 │   ├── __init__.py                ✅ créé
@@ -192,6 +192,9 @@ yt-insight/
 │   ├── test_transcriber.py        ✅ créé  (42 tests)
 │   ├── test_analyzer.py           ✅ créé  (25 tests)
 │   ├── test_text_utils.py         ✅ créé  (19 tests)
+│   ├── test_config.py             ✅ créé  (22 tests, config + logger)
+│   ├── test_output.py             ✅ créé  (21 tests, console + file_writer)
+│   ├── test_cli.py                ✅ créé  (16 tests, Typer CliRunner)
 │   └── fixtures/
 │       └── sample_transcript.txt  🔜 à créer
 │
@@ -362,64 +365,122 @@ output:
 > **Prérequis :** `llama-server` doit tourner sur :8080 (cf. section Installation).
 > Sinon, lance-le dans un terminal séparé avant d'utiliser `yt-insight`.
 
-### Commande de base
+### Sous-commandes
+
+| Commande                      | Description                                                |
+|-------------------------------|------------------------------------------------------------|
+| `yt-insight all URL`          | Pipeline complet : download → transcribe → analyze → write |
+| `yt-insight download URL`     | Télécharge l'audio (utile pour pré-cacher)                 |
+| `yt-insight transcribe PATH`  | Transcrit un fichier local ou une URL, écrit en JSON       |
+| `yt-insight analyze [PATH]`   | Analyse un transcript JSON (ou transcrit+analyse si `--audio`) |
+| `yt-insight version`          | Affiche la version installée                               |
+
+Toutes les options peuvent être passées en CLI, via variables d'environnement (`YT_INSIGHT_*`, `WHISPER_*`, `LLAMACPP_*`) ou via `config.yaml`.
+
+### Exemples
 
 ```bash
-# Analyser une vidéo avec les paramètres par défaut
-yt-insight "https://www.youtube.com/watch?v=VIDEO_ID"
+# Pipeline complet avec les paramètres par défaut
+yt-insight all "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # Spécifier la langue (gain de vitesse Whisper)
-yt-insight "https://youtube.com/watch?v=VIDEO_ID" --language fr
+yt-insight all "https://youtube.com/watch?v=VIDEO_ID" --language fr
 
 # Utiliser un autre serveur llama.cpp (ex: GPU distant)
-yt-insight "https://youtube.com/watch?v=VIDEO_ID" --llamacpp-url http://gpu:8080
+yt-insight all "https://youtube.com/watch?v=VIDEO_ID" --llamacpp-url http://gpu:8080
 
 # Utiliser un modèle différent
-yt-insight "https://youtube.com/watch?v=VIDEO_ID" --llamacpp-model other-model.gguf
+yt-insight all "https://youtube.com/watch?v=VIDEO_ID" --llamacpp-model other-model.gguf
 
 # Sauvegarder dans un dossier spécifique
-yt-insight "https://youtube.com/watch?v=VIDEO_ID" --output-dir ~/analyses/
+yt-insight all "https://youtube.com/watch?v=VIDEO_ID" --output-dir ~/analyses/
 
-# Exécuter seulement la transcription (sans analyse LLM)
-yt-insight "https://youtube.com/watch?v=VIDEO_ID" --steps download,transcribe
+# Exécuter seulement le téléchargement (pas de transcription ni d'analyse)
+yt-insight all "https://youtube.com/watch?v=VIDEO_ID" --steps download
 
-# Analyser une transcription existante (skip download + transcription)
-yt-insight --transcript-file ./outputs/ma_transcription.txt
+# Idem, plusieurs étapes possibles
+yt-insight all "https://youtube.com/watch?v=VIDEO_ID" --steps transcribe,analyze
+
+# Transcrire un fichier audio local et sauvegarder le JSON
+yt-insight transcribe ./audio.mp3 --language fr --output ./transcript.json
+
+# Analyser un transcript déjà produit (skip download + transcription)
+yt-insight analyze ./outputs/transcript.json --no-console
+
+# Transcrire + analyser une URL en un seul shot
+yt-insight analyze --audio "https://youtube.com/watch?v=VIDEO_ID"
 
 # Activer le mode verbose (logs détaillés)
-yt-insight "https://youtube.com/watch?v=VIDEO_ID" --verbose
+yt-insight all "https://youtube.com/watch?v=VIDEO_ID" --verbose
+
+# Désactiver le rendu terminal (utile en cron / pipe)
+yt-insight all "URL" --no-console
+
+# Plusieurs formats de sortie
+yt-insight all "URL" --format markdown --format json
 ```
 
 ### Exemples de sortie console
 
 ```
-╔══════════════════════════════════════════════════════╗
-║              YT-Insight  v0.1.0                     ║
-╚══════════════════════════════════════════════════════╝
+╭──────────────────────────────────────────────────────────────╮
+│ YT-Insight v0.1.0                                           │
+│ Pipeline complet — https://youtube.com/watch?v=abc123       │
+╰──────────────────────────────────────────────────────────────╯
+  📥 Titre     Comment fonctionne l'attention dans les Transformers
+     Chaîne   DeepLearning.AI
+     Durée    42:17
+     Fichier  cache/abc123.mp3
+     Cache    non
+  🎙️ Langue          fr (p=0.99)
+     Segments        847
+     Tokens estimés  18,432
+     Temps           2m 04s
+  🤖 Modèle          Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+     Backend        llamacpp-local
+     Points clés    12
+     Citations      5
+     Temps          1m 22s
 
-📥 Téléchargement audio...
-  ✓ Titre     : "Comment fonctionne l'attention dans les Transformers"
-  ✓ Durée     : 42:17
-  ✓ Format    : mp3 / 128kbps
-  ✓ Fichier   : cache/abc123.mp3 (38.2 Mo)
+╭─ YT-Insight — Qwen3.6-35B-A3B-UD-IQ3_S.gguf ────────────────╮
+│ Backend : llamacpp-local                                    │
+│ URL     : https://youtube.com/watch?v=abc123               │
+╰─────────────────────────────────────────────────────────────╯
 
-🎙️ Transcription (faster-whisper large-v3 · CUDA int8)...
-  ████████████████████ 100%  42:17 / 42:17  [00:03:21]
-  ✓ Langue détectée : Français (confiance : 0.99)
-  ✓ Segments       : 847
-  ✓ Tokens estimés : 18,432
+  Sujet : Intelligence Artificielle   Ton : pédagogique   Public : développeurs
 
-🤖 Analyse LLM (llama.cpp · Qwen3.6 35B-A3B)...
-  ✓ Résumé généré
-  ✓ Points clés extraits (12 points)
-  ✓ Analyse approfondie générée
-  ✓ Citations notables extraites (5)
+╭─ 📝 Résumé détaillé ────────────────────────────────────────╮
+│ Cette vidéo explore en profondeur le mécanisme d'attention…│
+│ [500-1000 mots de prose continue]                          │
+╰─────────────────────────────────────────────────────────────╯
 
-💾 Sauvegarde...
-  ✓ outputs/2024-01-15_transformers-attention.md
-  ✓ outputs/2024-01-15_transformers-attention.json
+╭─ 🎯 Points clés ────────────────────────────────────────────╮
+│ 1. Le mécanisme d'attention permet au modèle de…           │
+│ 2. Les têtes d'attention multiples capturent…               │
+│ …                                                          │
+╰─────────────────────────────────────────────────────────────╯
 
-⏱️  Temps total : 4m 38s
+╭─ 🔍 Analyse approfondie ────────────────────────────────────╮
+│ **Forces**                                                 │
+│ - Clarté des explications                                  │
+│                                                            │
+│ **Concepts centraux**                                      │
+│ - Attention, embeddings, pré-entraînement                  │
+╰─────────────────────────────────────────────────────────────╯
+
+             💬 Citations notables
+┏━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Timestamp ┃ Citation                             ┃
+┡━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 12:34     │ L'attention est le mécanisme qui…   │
+│ 27:15     │ Le scale a tout changé.              │
+└───────────┴─────────────────────────────────────┘
+
+  fr · 42:17 · 18,432 tokens · 12 points clés · 5 citations
+
+💾 Fichiers écrits :
+   markdown → outputs/2026-06-08_comment-fonctionne-lattention-dans-les-trans.md
+   json     → outputs/2026-06-08_comment-fonctionne-lattention-dans-les-trans.json
 ```
 
 ### Format de sortie Markdown
@@ -528,7 +589,7 @@ Formats d'URL supportés pour l'extraction du `video_id` :
 - `youtube.com/embed/VIDEO_ID`
 - Fallback : hash MD5 de l'URL (stable, pour formats non-standards)
 
-**Tests — `tests/test_downloader.py` (12 tests) ✅**
+**Tests — `tests/test_downloader.py` (16 tests) ✅**
 
 ```
 TestExtractVideoId         — 5 tests (formats d'URL + fallback hash)
@@ -740,13 +801,176 @@ TestDataClasses             — 5 tests  (Quote.ts, AnalysisResult.to_dict, has_
 
 ### `utils/text_utils.py`
 
-Fonctions utilitaires :
+Fonctions utilitaires stateless :
 - `estimate_tokens(text)` : estimation rapide du nombre de tokens (longueur/4)
 - `chunk_text(text, max_tokens, overlap)` : découpage intelligent aux frontières de phrases
 - `format_transcript_with_timestamps(segments)` : mise en forme `[HH:MM:SS] texte`
 - `clean_transcript(text)` : nettoyage basique (espaces, artefacts Whisper)
 
+**Tests — `tests/test_text_utils.py` (19 tests) ✅**
+
 ---
+
+### `utils/config.py` + `utils/logger.py` ✅
+
+**Statut : terminés et testés.**
+
+#### Configuration typée
+
+Cinq dataclasses immutables composent `AppConfig` :
+
+| Dataclass             | Champs principaux                                              |
+|-----------------------|----------------------------------------------------------------|
+| `PathsConfig`         | `output_dir`, `cache_dir`, `keep_audio`                        |
+| `PipelineConfig`      | `steps: list[str]`, `fail_fast: bool`                          |
+| `TranscriptionConfig` | `model`, `device`, `compute_type`, `beam_size`, `language`, `vad_filter` |
+| `AnalysisConfig`      | `max_transcript_tokens`, `overflow_strategy`, `outputs`        |
+| `OutputConfig`        | `formats`, `include_transcript`, `include_timestamps`          |
+
+`load_config(path=None, create_paths=True)` charge la config dans l'ordre de priorité :
+
+1. Défauts sains (intégrés au code)
+2. Fichier YAML (défaut `./config.yaml`, override `YT_INSIGHT_CONFIG`)
+3. Variables d'environnement (`YT_INSIGHT_*`, `WHISPER_*`, `LLAMACPP_*`)
+
+Exemple de `config.yaml` :
+
+```yaml
+paths:
+  output_dir: ./outputs
+  cache_dir: ./cache
+  keep_audio: false
+
+pipeline:
+  steps: [download, transcribe, analyze]
+  fail_fast: true
+
+transcription:
+  model: large-v3
+  device: cuda
+  compute_type: int8
+  beam_size: 5
+  language: fr          # ou null pour auto-détection
+  vad_filter: true
+
+analysis:
+  max_transcript_tokens: 100000
+  overflow_strategy: chunk    # chunk | truncate | summarize_chunks
+  outputs: [summary, key_points, analysis, quotes, metadata]
+
+output:
+  formats: [console, markdown, json]
+  include_transcript: true
+  include_timestamps: true
+```
+
+#### Logging structuré
+
+`setup_logging(level)` est idempotent (peut être appelé plusieurs fois sans dupliquer les handlers), utilise `RichHandler` quand rich est dispo, et tame automatiquement les loggers bruyants (`httpx`, `httpcore`, `yt_dlp` → WARNING).
+
+**Tests — `tests/test_config.py` (22 tests) ✅**
+
+```
+TestDefaults          — 5 tests
+TestYamlLoading       — 5 tests
+TestEnvOverrides      — 4 tests
+TestFitsInWindow      — 3 tests
+TestLogger            — 5 tests
+```
+
+---
+
+### `output/console.py` ✅
+
+**Statut : terminé et testé.**
+
+`ConsoleRenderer` rend un `AnalysisResult` (+ éventuellement une `TranscriptionResult`) en sortie terminal avec Rich : Panel cyan pour le header, Panel vert pour chaque section (Résumé, Points clés, Analyse), Table magenta pour les Citations, footer gris avec les stats.
+
+Toggle individuel de chaque section via `RenderConfig` :
+
+```python
+from yt_insight.output import ConsoleRenderer, RenderConfig
+
+renderer = ConsoleRenderer(config=RenderConfig(
+    show_transcript=False,      # désactive l'aperçu transcription
+    show_quotes=True,
+    max_transcript_chars=2000,
+))
+renderer.render(analysis, transcription, video_url="https://…")
+```
+
+`render_to_string(analysis, transcription)` retourne le rendu en string (utile pour les tests).
+
+**Tests — `tests/test_output.py` (6 tests console) ✅**
+
+---
+
+### `output/file_writer.py` ✅
+
+**Statut : terminé et testé.**
+
+Deux formats, mêmes options :
+
+```python
+from yt_insight.output import FileWriter
+
+writer = FileWriter(
+    output_dir=Path("./outputs"),
+    include_transcript=True,
+    include_timestamps=True,
+)
+
+# Markdown
+path = writer.write_markdown(analysis, title="…", video_url="…",
+                             metadata=metadata, transcription=transcription)
+# → outputs/2026-06-08_intitule-de-la-video.md
+
+# JSON
+path = writer.write_json(analysis, title="…", video_url="…",
+                         metadata=metadata, transcription=transcription)
+# → outputs/2026-06-08_intitule-de-la-video.json
+
+# Les deux
+paths = writer.write_both(analysis, …)  # {"markdown": Path, "json": Path}
+```
+
+Le **Markdown** contient un front matter YAML (titre, URL, date, model, backend, langue, durée, topic, tone, audience, channel, video_id), suivi des sections en français (📝 Résumé, 🎯 Points clés numérotés, 🔍 Analyse, 💬 Citations en blockquote, 📄 Transcription horodatée en bloc de code).
+
+Le **JSON** est une sérialisation stricte des dataclasses, prête pour import Notebook / DB.
+
+Le helper `write_outputs(analysis, output_dir, formats=[…])` fait le one-shot.
+
+**Tests — `tests/test_output.py` (15 tests file_writer) ✅**
+
+---
+
+### `cli.py` ✅
+
+**Statut : terminé et testé.**
+
+Quatre sous-commandes Typer, plus la commande `version` :
+
+| Sous-commande    | Arguments              | Ce qu'elle fait                                    |
+|------------------|------------------------|----------------------------------------------------|
+| `download`       | `URL`                  | Télécharge l'audio dans le cache                   |
+| `transcribe`     | `SOURCE`               | URL ou chemin local → JSON transcript              |
+| `analyze`        | `[TRANSCRIPT]` + `--audio` | JSON existant ou transcrit+analyse             |
+| `all`            | `URL`                  | Pipeline complet end-to-end                        |
+| `version`        | —                      | Affiche la version                                 |
+
+Options communes : `--language`, `--output-dir`, `--cache-dir`, `--llamacpp-url`, `--llamacpp-model`, `--format`, `--steps`, `--no-console`, `--config`, `--verbose`.
+
+L'option `--steps` accepte une liste (répétée) ou une string CSV :
+```bash
+yt-insight all URL --steps transcribe,analyze
+yt-insight all URL --steps transcribe --steps analyze    # équivalent
+```
+
+`setup_logging()` est appelé une fois au début (avec `--verbose` on passe en DEBUG), puis `load_config()` construit l'`AppConfig` finale.
+
+**Tests — `tests/test_cli.py` (16 tests) ✅** (avec `typer.testing.CliRunner`, modules I/O mockés)
+
+```
 
 ## Flux de données
 
@@ -821,16 +1045,15 @@ Fonctions utilitaires :
 
 ## Roadmap
 
-### Phase 1 — MVP (en cours) 🚧
+### Phase 1 — MVP ✅ **TERMINÉ**
 - [x] Architecture & README
 - [x] `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.env.example`
 - [x] Module downloader — `yt_insight/downloader/ytdlp_downloader.py` (16 tests)
 - [x] Module transcriber — `yt_insight/transcriber/{base,faster_whisper_transcriber}.py` (42 tests)
 - [x] Module analyzer — `yt_insight/analyzer/{base,prompts,llamacpp_local}.py` (25 tests)
-- [x] Module utils — `yt_insight/utils/text_utils.py` (19 tests, chunking + cleanup)
-- [ ] Module output — `output/{console,file_writer}.py` (Markdown + Rich)
-- [ ] CLI Rich + Typer — sous-commandes `download` / `transcribe` / `analyze` / `all`
-- [ ] `utils/config.py` (chargement config.yaml + env)
+- [x] Module utils — `yt_insight/utils/{text_utils,config,logger}.py` (41 tests)
+- [x] Module output — `yt_insight/output/{console,file_writer}.py` (21 tests)
+- [x] CLI Typer — `yt_insight/cli.py` avec sous-commandes `all` / `download` / `transcribe` / `analyze` / `version` (16 tests)
 
 ### Phase 2 — Backends supplémentaires
 - [ ] Backend Ollama (même API OpenAI-compat, juste changer `LLAMACPP_BASE_URL`)
@@ -847,7 +1070,7 @@ Fonctions utilitaires :
 - [ ] Recherche full-text dans les transcriptions
 
 ### Phase 4 — Qualité
-- [ ] Suite de tests complète (actuellement 102/102 ✅)
+- [x] Suite de tests complète (161/161 ✅)
 - [ ] CI/CD GitHub Actions
 - [ ] Dockerisation
 - [ ] Packaging PyPI

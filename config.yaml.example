@@ -1,0 +1,45 @@
+# ===========================================================
+#  YT-Insight — example configuration
+#  Copy this file to ./config.yaml and edit as needed.
+#  Every value is optional — the defaults below match the
+#  built-in defaults in yt_insight.utils.config.
+# ===========================================================
+
+paths:
+  output_dir: ./outputs
+  cache_dir: ./cache
+  keep_audio: false          # delete the .mp3 after transcription?
+
+pipeline:
+  # Which steps to run, in order. Used by the CLI when --steps is omitted.
+  steps:
+    - download
+    - transcribe
+    - analyze
+  fail_fast: true            # abort on the first error
+
+transcription:
+  model: large-v3            # tiny|base|small|medium|large-v3|distil-large-v3|…
+  device: auto               # auto | cuda | cpu
+  compute_type: int8         # int8 | int8_float16 | float16 | float32
+  beam_size: 5
+  language: null             # ISO 639-1 (fr, en, …) or null for auto-detect
+  vad_filter: true           # skip silent regions (faster)
+  word_timestamps: false     # segment-level timestamps only (sufficient)
+
+analysis:
+  max_transcript_tokens: 100000
+  overflow_strategy: chunk   # chunk | truncate | summarize_chunks
+  outputs:
+    - summary
+    - key_points
+    - analysis
+    - quotes
+    - metadata
+
+output:
+  formats:
+    - markdown
+    - json
+  include_transcript: true
+  include_timestamps: true
