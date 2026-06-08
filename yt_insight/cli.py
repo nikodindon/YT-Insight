@@ -115,12 +115,15 @@ def _run_analyze_with_live(
     """
     Run ``analyzer.analyze()`` and stream the LLM output live to the terminal.
 
-    The Rich ``Live`` panel shows the model's tokens as they arrive, plus a
-    running stats line (chars + elapsed seconds). If ``show_live`` is False
-    (e.g. in tests / pipe mode), the analyzer is called without a callback
-    and the result is returned when ready.
+    Uses Rich's ``Live`` with ``transient=True`` so the panel is erased
+    at the end and a clean console is left behind. We render the
+    *current preview* (capped at ~1000 chars) inside a Panel; tokens are
+    appended live via the ``on_token`` callback.
+
+    If the console is not interactive (CI, pipe, redirect), we fall
+    back to a non-live call so the user still gets the analysis.
     """
-    if not show_live or console.is_interactive is False:
+    if not show_live or not console.is_interactive:
         with analyzer:
             return analyzer.analyze(
                 transcription, title=title, language=language,
@@ -160,25 +163,45 @@ def _run_analyze_with_live(
 
     from .analyzer.llamacpp_local import AnalysisError
 
-    with Live(make_panel(), console=console, refresh_per_second=8, transient=False) as live:
-        def live_on_token(delta: str) -> None:
-            on_token(delta)
-            live.update(make_panel())
+    # ``transient=True`` makes Rich erase the panel on exit, leaving
+    # a clean console. ``redirect_stdout`` is critical: it prevents
+    # child output (httpx logs, etc.) from racing the Live redraw and
+    # leaving stray "ghost" panels behind.
+    import contextlib
+    import sys
 
-        with analyzer:
+    result_holder: dict = {}
+
+    with contextlib.redirect_stdout(sys.stderr):
+        with Live(
+            make_panel(),
+            console=console,
+            refresh_per_second=6,
+            transient=True,
+            redirect_stdout=False,  # we already redirected above
+        ) as live:
+            def live_on_token(delta: str) -> None:
+                on_token(delta)
+                live.update(make_panel())
+
             try:
-                result = analyzer.analyze(
-                    transcription, title=title, language=language,
-                    on_token=live_on_token,
-                )
+                with analyzer:
+                    result_holder["result"] = analyzer.analyze(
+                        transcription, title=title, language=language,
+                        on_token=live_on_token,
+                    )
             except AnalysisError:
-                # Surface the error inside the panel before letting it bubble.
-                state["buffer"] = str(state["buffer"]) + "\n\n[ERROR] "  # type: ignore[assignment]
+                # Final panel shows the error before re-raising.
+                state["buffer"] = (
+                    str(state["buffer"]) + "\n\n[ERROR] "  # type: ignore[assignment]
+                )
                 live.update(make_panel())
                 raise
-        # Final update so the user sees the last tokens.
-        live.update(make_panel())
-    return result
+            # One last refresh so the user sees the last tokens
+            # before the panel is erased (transient=True).
+            live.update(make_panel())
+
+    return result_holder["result"]
 
 
 # ---------------------------------------------------------------------------
