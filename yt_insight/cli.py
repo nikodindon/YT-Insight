@@ -29,6 +29,7 @@ from rich.panel import Panel
 
 from . import __version__
 from .analyzer import create_analyzer
+from .estimate import estimate_url, format_estimate
 from .downloader import DownloadResult, YtDlpDownloader
 from .output import ConsoleRenderer, write_outputs
 from .transcriber import create_transcriber
@@ -143,6 +144,52 @@ def download(
 # ---------------------------------------------------------------------------
 # transcribe
 # ---------------------------------------------------------------------------
+
+@app.command()
+def estimate(
+    url: str = typer.Argument(..., help="YouTube URL to estimate."),
+    hardware: str = typer.Option(
+        "gpu_gtx_1050", "--hardware",
+        help="Transcription hardware: gpu_gtx_1050, gpu_gtx_1650, gpu_rtx_3060, cpu.",
+    ),
+    content_type: str = typer.Option(
+        "talk", "--content-type",
+        help="talk | lecture | podcast | interview | fast.",
+    ),
+    llm_quant: str = typer.Option(
+        "iq4_xs", "--llm-quant",
+        help="Model quantization: iq1_m, iq3_s, iq4_xs, q4_k_m, q5_k_m, q6_k, q8_0.",
+    ),
+    max_prompt_tokens: int = typer.Option(
+        28_000, "--max-prompt-tokens", min=1_000,
+        help="LLM window size (must be < n_ctx of the server).",
+    ),
+    chunk_overlap: int = typer.Option(
+        200, "--chunk-overlap", min=0,
+        help="Overlap between consecutive chunks when chunk+merge fires.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output the estimate as JSON instead of formatted text.",
+    ),
+) -> None:
+    """
+    Estimate the cost (time, transcript size, LLM strategy) of running the
+    full pipeline on a YouTube URL — without actually downloading or
+    transcribing anything (just metadata via yt-dlp).
+    """
+    est = estimate_url(
+        url,
+        max_prompt_tokens=max_prompt_tokens,
+        chunk_overlap_tokens=chunk_overlap,
+        hardware=hardware,
+        content_type=content_type,
+        llm_quant=llm_quant,
+    )
+    if json_output:
+        typer.echo(json.dumps(est.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(format_estimate(est))
+
 
 @app.command()
 def transcribe(

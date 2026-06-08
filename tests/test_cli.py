@@ -336,7 +336,7 @@ class TestMisc:
     def test_help_shows_all_commands(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        for cmd in ("download", "transcribe", "analyze", "all", "version"):
+        for cmd in ("download", "transcribe", "analyze", "all", "version", "estimate"):
             assert cmd in result.stdout
 
     def test_no_args_shows_quick_start(self):
@@ -354,3 +354,84 @@ class TestMisc:
         assert result.exit_code == 0
         # setup_logging("DEBUG") was called for verbose
         mock_setup.assert_any_call("DEBUG")
+
+
+# ---------------------------------------------------------------------------
+# estimate
+# ---------------------------------------------------------------------------
+
+class TestEstimateCli:
+    def test_estimate_text_output(self):
+        from yt_insight.estimate import Estimate
+
+        fake = Estimate(
+            url="https://youtu.be/abc", video_title="Talk", channel="Ch",
+            duration_seconds=600.0, audio_mb=14.0,
+            predicted_transcript_chars=8500, predicted_transcript_tokens=2125,
+            predicted_word_count=1550, transcription_seconds_gpu=107,
+            transcription_seconds_cpu=640, llm_strategy="single-shot",
+            n_chunks=1, llm_max_prompt_tokens=28000, n_ctx_required=2925,
+            llm_passes=1, llm_analysis_seconds=400, total_seconds_gpu=508,
+            total_seconds_cpu=1041, download_seconds=1.4,
+        )
+        with patch("yt_insight.cli.estimate_url", return_value=fake) as mock_est:
+            result = runner.invoke(app, ["estimate", "https://youtu.be/abc"])
+
+        assert result.exit_code == 0, result.stdout
+        mock_est.assert_called_once()
+        assert "Talk" in result.stdout
+        assert "single-shot" in result.stdout
+
+    def test_estimate_json_output(self):
+        from yt_insight.estimate import Estimate
+        import json
+
+        fake = Estimate(
+            url="u", video_title="X", channel="Y", duration_seconds=60.0,
+            audio_mb=1.5, predicted_transcript_chars=850,
+            predicted_transcript_tokens=212, predicted_word_count=155,
+            transcription_seconds_gpu=17, transcription_seconds_cpu=100,
+            llm_strategy="single-shot", n_chunks=1,
+            llm_max_prompt_tokens=28000, n_ctx_required=2925,
+            llm_passes=1, llm_analysis_seconds=400, total_seconds_gpu=420,
+            total_seconds_cpu=503, download_seconds=0.2,
+        )
+        with patch("yt_insight.cli.estimate_url", return_value=fake):
+            result = runner.invoke(app, ["estimate", "https://youtu.be/abc", "--json"])
+
+        assert result.exit_code == 0, result.stdout
+        data = json.loads(result.stdout)
+        assert data["video_title"] == "X"
+        assert data["llm_strategy"] == "single-shot"
+
+    def test_estimate_passes_options(self):
+        from yt_insight.estimate import Estimate
+
+        fake = Estimate(
+            url="u", video_title="X", channel="Y", duration_seconds=60.0,
+            audio_mb=1.0, predicted_transcript_chars=100,
+            predicted_transcript_tokens=25, predicted_word_count=15,
+            transcription_seconds_gpu=10, transcription_seconds_cpu=60,
+            llm_strategy="single-shot", n_chunks=1,
+            llm_max_prompt_tokens=60_000, n_ctx_required=1525,
+            llm_passes=1, llm_analysis_seconds=200, total_seconds_gpu=212,
+            total_seconds_cpu=262, download_seconds=0.1,
+        )
+        with patch("yt_insight.cli.estimate_url", return_value=fake) as mock_est:
+            result = runner.invoke(app, [
+                "estimate", "https://youtu.be/abc",
+                "--hardware", "cpu",
+                "--content-type", "podcast",
+                "--llm-quant", "iq3_s",
+                "--max-prompt-tokens", "60000",
+                "--chunk-overlap", "500",
+            ])
+
+        assert result.exit_code == 0, result.stdout
+        mock_est.assert_called_once()
+        kwargs = mock_est.call_args.kwargs
+        assert kwargs["hardware"] == "cpu"
+        assert kwargs["content_type"] == "podcast"
+        assert kwargs["llm_quant"] == "iq3_s"
+        assert kwargs["max_prompt_tokens"] == 60_000
+        assert kwargs["chunk_overlap_tokens"] == 500

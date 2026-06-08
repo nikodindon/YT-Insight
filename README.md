@@ -49,9 +49,10 @@ Chaque étape est modulaire, testable indépendamment, et configurable pour tour
 | **Analyzer**    | `analyzer/{base,prompts,llamacpp_local}.py`     | 25 ✅   | **Terminé**   |
 | **Utils**       | `utils/{text_utils,config,logger}.py`           | 41 ✅   | **Terminé**   |
 | **Output**      | `output/{console,file_writer}.py`               | 21 ✅   | **Terminé**   |
-| **CLI**         | `cli.py` (4 sous-commandes Typer)               | 16 ✅   | **Terminé**   |
+| **CLI**         | `cli.py` (5 sous-commandes Typer)               | 19 ✅   | **Terminé**   |
+| **Estimate**    | `estimate.py` + 3 tests CLI                    | 24 ✅   | **Terminé**   |
 
-Total : **161 tests passent** (`pytest tests/ -q`).
+Total : **188 tests passent** (`pytest tests/ -q`).
 
 ---
 
@@ -180,6 +181,8 @@ yt-insight/
 │   │   ├── console.py             ✅ rendu Rich terminal (panels, tables, Markdown)
 │   │   └── file_writer.py         ✅ export Markdown (front matter YAML + sections) et JSON structuré
 │   │
+│   ├── estimate.py                ✅ prédiction du coût (temps, tokens, stratégie LLM) avant lancement
+│   │
 │   └── utils/                     ✅ MODULE TERMINÉ
 │       ├── __init__.py            ✅ expose load_config, AppConfig + sous-configs, setup_logging, chunk_text, etc.
 │       ├── text_utils.py          ✅ chunking intelligent, estimation tokens, nettoyage, formatage timestamps
@@ -194,7 +197,8 @@ yt-insight/
 │   ├── test_text_utils.py         ✅ créé  (19 tests)
 │   ├── test_config.py             ✅ créé  (22 tests, config + logger)
 │   ├── test_output.py             ✅ créé  (21 tests, console + file_writer)
-│   ├── test_cli.py                ✅ créé  (16 tests, Typer CliRunner)
+│   ├── test_cli.py                ✅ créé  (19 tests, Typer CliRunner)
+│   ├── test_estimate.py           ✅ créé  (24 tests, prédiction de coût)
 │   └── fixtures/
 │       └── sample_transcript.txt  🔜 à créer
 │
@@ -373,6 +377,7 @@ output:
 | `yt-insight download URL`     | Télécharge l'audio (utile pour pré-cacher)                 |
 | `yt-insight transcribe PATH`  | Transcrit un fichier local ou une URL, écrit en JSON       |
 | `yt-insight analyze [PATH]`   | Analyse un transcript JSON (ou transcrit+analyse si `--audio`) |
+| `yt-insight estimate URL`     | **Prédit** le temps/coût d'analyse sans rien lancer        |
 | `yt-insight version`          | Affiche la version installée                               |
 
 Toutes les options peuvent être passées en CLI, via variables d'environnement (`YT_INSIGHT_*`, `WHISPER_*`, `LLAMACPP_*`) ou via `config.yaml`.
@@ -418,6 +423,20 @@ yt-insight all "URL" --no-console
 
 # Plusieurs formats de sortie
 yt-insight all "URL" --format markdown --format json
+
+# Estimer le coût d'une vidéo SANS lancer le pipeline (juste métadonnées yt-dlp)
+yt-insight estimate "https://youtube.com/watch?v=VIDEO_ID"
+# → affiche durée, taille audio, mots/tokens prédits, stratégie LLM (single-shot
+#   vs chunk+merge), temps de transcription et d'analyse estimés, total
+
+# Estimer avec du hardware custom (ex: tu passes sur RTX 3060)
+yt-insight estimate "URL" --hardware gpu_rtx_3060
+
+# Estimer pour un podcast (plus rapide) vs une conférence (plus lent)
+yt-insight estimate "URL" --content-type podcast
+
+# Sortie JSON de l'estimate (pour scripter / pipeline)
+yt-insight estimate "URL" --json
 ```
 
 ### Exemples de sortie console
@@ -948,7 +967,7 @@ Le helper `write_outputs(analysis, output_dir, formats=[…])` fait le one-shot.
 
 **Statut : terminé et testé.**
 
-Quatre sous-commandes Typer, plus la commande `version` :
+Cinq sous-commandes Typer, plus la commande `version` :
 
 | Sous-commande    | Arguments              | Ce qu'elle fait                                    |
 |------------------|------------------------|----------------------------------------------------|
@@ -956,6 +975,7 @@ Quatre sous-commandes Typer, plus la commande `version` :
 | `transcribe`     | `SOURCE`               | URL ou chemin local → JSON transcript              |
 | `analyze`        | `[TRANSCRIPT]` + `--audio` | JSON existant ou transcrit+analyse             |
 | `all`            | `URL`                  | Pipeline complet end-to-end                        |
+| `estimate`       | `URL`                  | Prédit le coût (temps, tokens, stratégie) sans lancer |
 | `version`        | —                      | Affiche la version                                 |
 
 Options communes : `--language`, `--output-dir`, `--cache-dir`, `--llamacpp-url`, `--llamacpp-model`, `--format`, `--steps`, `--no-console`, `--config`, `--verbose`.
@@ -968,9 +988,78 @@ yt-insight all URL --steps transcribe --steps analyze    # équivalent
 
 `setup_logging()` est appelé une fois au début (avec `--verbose` on passe en DEBUG), puis `load_config()` construit l'`AppConfig` finale.
 
-**Tests — `tests/test_cli.py` (16 tests) ✅** (avec `typer.testing.CliRunner`, modules I/O mockés)
+**Tests — `tests/test_cli.py` (19 tests) ✅** (avec `typer.testing.CliRunner`, modules I/O mockés)
 
 ```
+TestDownload        — 3 tests
+TestTranscribe      — 3 tests
+TestAnalyze         — 3 tests
+TestAll             — 3 tests
+TestMisc            — 3 tests  (help, no-args, verbose)
+TestEstimateCli     — 3 tests  (text, json, options pass-through)
+```
+
+---
+
+### `estimate.py` ✅
+
+**Statut : terminé et testé.**
+
+`estimate_url(url, ...)` prédit le coût complet d'un run SANS rien télécharger ni transcrire. Il récupère juste les métadonnées via yt-dlp (`fetch_metadata_only`), puis applique des heuristiques :
+
+- **Transcription** : `audio_duration × WPM (par type de contenu) × 5.5 chars/mot` pour prédire la taille du transcript
+- **LLM** : si `n_tokens + 1500 < max_prompt_tokens` → single-shot, sinon chunk+merge avec calcul du nombre de chunks
+- **Timings** : table de `RTFX` (real-time factor) par hardware (gtx_1050, gtx_1650, rtx_3060, cpu) et `tokens/sec` par quant (iq1_m, iq3_s, iq4_xs, q4_k_m, q5_k_m, q6_k, q8_0)
+
+```bash
+yt-insight estimate "URL" --hardware gpu_gtx_1050 --content-type lecture \
+    --llm-quant iq4_xs --max-prompt-tokens 60000
+```
+
+Sortie typique :
+```
+📺 Stanford MS&E435 Economics of the AI Supercycle | Spring 2026
+   Chaîne       : Stanford Online
+   Durée vidéo  : 49:15 (2955s)
+   URL          : https://www.youtube.com/watch?v=Qh7Oxvo5sJI
+
+💾 Audio estimé : 69.3 Mo (mp3 192kbps)
+   Télécharg.   : ~7s
+
+📝 Transcript prévu (heuristique) :
+   Mots         : ~6,402
+   Caractères   : ~35,211
+   Tokens       : ~8,802
+
+🎙️ Transcription (faster-whisper large-v3) :
+   Sur GPU      : ~8m20s
+   Sur CPU      : ~49m55s
+
+🤖 Analyse LLM (llamacpp-local) :
+   Stratégie    : single-shot
+   Passes LLM   : 1
+   n_ctx requis : 10,302 tokens
+   Temps estimé : ~6m40s
+
+⏱️  TOTAL estimé :
+   Avec GPU     : ~15m07s
+   Avec CPU     : ~56m42s
+```
+
+`--json` produit la même chose en JSON structuré (pratique pour scripter).
+
+**Tests — `tests/test_estimate.py` (24 tests) ✅** (métadonnées yt-dlp mockées)
+
+```
+TestSmoke              — 5 tests  (short single-shot, long chunk+merge, content-type impact)
+TestHeuristics         — 5 tests  (audio size, hardware rtfx, quant tps, fallbacks)
+TestNotes              — 4 tests  (warnings CPU, chunk+merge, audio > 200 Mo)
+TestEstimateDataclass  — 3 tests  (duration_str, to_dict, fields)
+TestFormatEstimate     — 1 test
+TestConstants          — 6 tests  (ordres RTFX, TPS, WPM, sanity)
+```
+
+---
 
 ## Flux de données
 
@@ -1053,7 +1142,8 @@ yt-insight all URL --steps transcribe --steps analyze    # équivalent
 - [x] Module analyzer — `yt_insight/analyzer/{base,prompts,llamacpp_local}.py` (25 tests)
 - [x] Module utils — `yt_insight/utils/{text_utils,config,logger}.py` (41 tests)
 - [x] Module output — `yt_insight/output/{console,file_writer}.py` (21 tests)
-- [x] CLI Typer — `yt_insight/cli.py` avec sous-commandes `all` / `download` / `transcribe` / `analyze` / `version` (16 tests)
+- [x] Module estimate — `yt_insight/estimate.py` (24 tests, prédiction de coût)
+- [x] CLI Typer — `yt_insight/cli.py` avec sous-commandes `all` / `download` / `transcribe` / `analyze` / `estimate` / `version` (19 tests)
 
 ### Phase 2 — Backends supplémentaires
 - [ ] Backend Ollama (même API OpenAI-compat, juste changer `LLAMACPP_BASE_URL`)
@@ -1070,7 +1160,7 @@ yt-insight all URL --steps transcribe --steps analyze    # équivalent
 - [ ] Recherche full-text dans les transcriptions
 
 ### Phase 4 — Qualité
-- [x] Suite de tests complète (161/161 ✅)
+- [x] Suite de tests complète (188/188 ✅)
 - [ ] CI/CD GitHub Actions
 - [ ] Dockerisation
 - [ ] Packaging PyPI
