@@ -45,7 +45,7 @@ Chaque étape est modulaire, testable indépendamment, et configurable pour tour
 | Module | Fichiers | Tests | Statut |
 |--------|----------|-------|--------|
 | **Downloader** | `downloader/ytdlp_downloader.py` | 12 ✅ | **Terminé** |
-| **Transcriber** | `transcriber/faster_whisper.py` | — | 🔜 En cours |
+| **Transcriber** | `transcriber/base.py`, `transcriber/faster_whisper_transcriber.py` | 26 ✅ | **Terminé** |
 | **Analyzer** | `analyzer/ollama_local.py` + prompts | — | 🔜 À venir |
 | **Output** | `output/console.py`, `file_writer.py` | — | 🔜 À venir |
 | **CLI** | `cli.py` | — | 🔜 À venir |
@@ -161,10 +161,10 @@ yt-insight/
 │   │   ├── __init__.py            ✅ expose YtDlpDownloader, DownloadResult
 │   │   └── ytdlp_downloader.py    ✅ implémentation complète
 │   │
-│   ├── transcriber/               🔜 module suivant
-│   │   ├── __init__.py
-│   │   ├── base.py                # Classe abstraite Transcriber
-│   │   └── faster_whisper.py      # Implémentation faster-whisper
+│   ├── transcriber/               ✅ MODULE TERMINÉ
+│   │   ├── __init__.py            ✅ expose BaseTranscriber, TranscriptionResult, Segment, FasterWhisperTranscriber
+│   │   ├── base.py                ✅ dataclasses Segment + TranscriptionResult, classe abstraite BaseTranscriber
+│   │   └── faster_whisper_transcriber.py  ✅ implémentation complète + factory create_transcriber()
 │   │
 │   ├── analyzer/                  🔜 module 3
 │   │   ├── __init__.py
@@ -188,7 +188,7 @@ yt-insight/
 ├── tests/
 │   ├── __init__.py                ✅ créé
 │   ├── test_downloader.py         ✅ créé  (12 tests)
-│   ├── test_transcriber.py        🔜 à créer
+│   ├── test_transcriber.py        ✅ créé  (26 tests)
 │   ├── test_analyzer.py           🔜 à créer
 │   └── fixtures/
 │       └── sample_transcript.txt  🔜 à créer
@@ -519,25 +519,91 @@ TestMetadataSerialization  — 2 tests (round-trip JSON, to_dict)
 
 ---
 
-### `transcriber/faster_whisper.py`
+### `transcriber/base.py` + `transcriber/faster_whisper_transcriber.py` ✅
 
-Responsabilités :
-- Charger le modèle Whisper en CUDA int8 (ou CPU si indisponible)
-- Transcrire le fichier audio avec timestamps par segment
-- Retourner un objet `TranscriptionResult` : texte brut + segments horodatés
-- Gérer la détection automatique de langue
-- Libérer la VRAM après transcription (important pour laisser de la mémoire au LLM local)
+**Statut : terminé et testé.**
 
-Structure de sortie :
+#### Classes exposées
+
+**`Segment`** — un segment horodaté retourné par Whisper :
 ```python
 @dataclass
-class TranscriptionResult:
-    text: str                    # Transcription brute complète
-    segments: list[Segment]      # [{start, end, text}, ...]
-    language: str                # "fr", "en", etc.
-    language_confidence: float
-    duration_seconds: float
+class Segment:
+    start: float   # secondes
+    end:   float
+    text:  str
+    # propriétés calculées :
+    # .duration   → float
+    # .start_str  → "1:23:45"
+    # .end_str    → "1:23:50"
 ```
+
+**`TranscriptionResult`** — tout ce dont le pipeline a besoin après transcription :
+```python
+result.text                            # transcription brute complète
+result.segments                        # list[Segment] avec timestamps
+result.language                        # "fr", "en", etc.
+result.language_probability            # 0.0 – 1.0
+result.duration_seconds / .duration_str
+result.estimated_tokens                # len(text) // 4
+result.model_name                      # "large-v3"
+
+result.formatted_transcript(with_timestamps=True)
+# "[0:00] Bonjour tout le monde.\n[0:05] Aujourd'hui on parle de…"
+
+result.to_dict()   # sérialisable JSON
+```
+
+**`FasterWhisperTranscriber`** — le backend principal :
+```python
+from yt_insight.transcriber import FasterWhisperTranscriber
+
+t = FasterWhisperTranscriber(
+    model_size="large-v3",   # ou "medium" si mémoire limitée
+    device="auto",           # "auto" → CUDA si dispo, sinon CPU
+    compute_type="int8",     # int8 = ~2.5 Go VRAM sur GTX 1650 Super
+    beam_size=5,
+    language=None,           # None = auto-détection
+    vad_filter=True,         # skip les silences → plus rapide
+)
+
+result = t.transcribe(Path("cache/abc123.mp3"))
+result = t.transcribe(Path("cache/abc123.mp3"), language="fr")  # override
+
+t.unload()   # ⚠️ IMPORTANT — libère la VRAM avant de charger le LLM
+```
+
+**`create_transcriber()`** — factory qui lit les variables d'environnement :
+```python
+# Lit WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE, WHISPER_LANGUAGE
+t = create_transcriber()
+```
+
+#### Comportements clés
+
+**Chargement paresseux (lazy init) :** le modèle Whisper n'est chargé en mémoire qu'au premier appel à `transcribe()`. Les appels suivants réutilisent le modèle déjà chargé.
+
+**Fallback CUDA → CPU automatique :** si le chargement en CUDA échoue (OOM ou driver absent), le transcriber retente automatiquement sur CPU avec `compute_type="int8"`.
+
+**Libération VRAM explicite :** `unload()` supprime le modèle, appelle `gc.collect()` et `torch.cuda.empty_cache()`. À appeler systématiquement avant de démarrer le LLM local pour éviter les conflits mémoire avec Qwen3 35B.
+
+**Filtrage VAD :** les segments vides ou en silence sont ignorés, ce qui évite d'envoyer du bruit au LLM.
+
+**Tests — `tests/test_transcriber.py` (26 tests) ✅**
+
+```
+TestSecondsToStr       — 8 tests  (formatage H:MM:SS)
+TestSegment            — 3 tests  (duration, start_str, end_str)
+TestTranscriptionResult— 6 tests  (tokens, duration, formatted_transcript, to_dict)
+TestDeviceResolution   — 5 tests  (auto/cuda/cpu, torch absent)
+TestLazyLoading        — 3 tests  (init, premier appel, réutilisation)
+TestTranscribe         — 9 tests  (résultat, texte, segments, langue, durée, override, fichier manquant, segments vides)
+TestUnload             — 3 tests  (clear, idempotent, flush CUDA)
+TestCudaFallback       — 1 test   (OOM → retry CPU)
+TestCreateTranscriber  — 3 tests  (defaults, env vars, langue vide)
+```
+
+> Tous les tests mockent `WhisperModel` — aucun téléchargement de modèle requis pour les faire tourner.
 
 ---
 
@@ -664,7 +730,8 @@ Fonctions utilitaires :
 - [x] `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.env.example`
 - [x] Module downloader — `yt_insight/downloader/ytdlp_downloader.py`
 - [x] Tests downloader — `tests/test_downloader.py` (12 tests)
-- [ ] Module transcriber (faster-whisper + CUDA)
+- [x] Module transcriber — `yt_insight/transcriber/base.py` + `faster_whisper_transcriber.py`
+- [x] Tests transcriber — `tests/test_transcriber.py` (26 tests)
 - [ ] Module analyzer (Ollama local)
 - [ ] CLI Rich + Typer
 - [ ] Output Markdown + JSON
