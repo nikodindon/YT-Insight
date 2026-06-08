@@ -87,22 +87,34 @@ class FasterWhisperTranscriber(BaseTranscriber):
         model_size: ModelSize = "large-v3",
         device: Literal["auto", "cuda", "cpu"] = "auto",
         compute_type: str = "int8",
-        beam_size: int = 5,
+        beam_size: int = 3,
         language: str | None = None,
         vad_filter: bool = True,
+        chunk_length: int | None = None,
     ):
+        """
+        Parameters
+        ----------
+        chunk_length:
+            Max audio chunk length in seconds. ``None`` = let faster-whisper
+            decide (default 30s). Lower this (e.g. 20) on GPUs with tight
+            VRAM to avoid CUDA OOM during generation.
+        """
         self.model_size   = model_size
         self.compute_type = compute_type
         self.beam_size    = beam_size
         self.language     = language
         self.vad_filter   = vad_filter
+        self.chunk_length = chunk_length
 
         self._device = self._resolve_device(device)
         self._model  = None   # lazy-loaded on first transcribe()
 
         logger.info(
-            "FasterWhisperTranscriber configured — model=%s device=%s compute=%s",
-            model_size, self._device, compute_type,
+            "FasterWhisperTranscriber configured — model=%s device=%s compute=%s "
+            "beam=%d chunk_length=%s",
+            model_size, self._device, compute_type, beam_size,
+            f"{chunk_length}s" if chunk_length else "auto",
         )
 
     # ------------------------------------------------------------------
@@ -134,20 +146,76 @@ class FasterWhisperTranscriber(BaseTranscriber):
 
         lang = language or self.language   # call-level > instance-level
 
+        # Try CUDA first (or CPU if device=cpu), with OOM → CPU fallback
+        return self._transcribe_with_oom_fallback(audio_path, lang)
+
+    # ------------------------------------------------------------------
+    # OOM-safe transcription core
+    # ------------------------------------------------------------------
+
+    def _transcribe_with_oom_fallback(
+        self,
+        audio_path: Path,
+        lang: str | None,
+    ) -> TranscriptionResult:
+        """
+        Run transcription, with automatic CUDA → CPU fallback on OOM.
+
+        OOM can happen in two places:
+        1. During model load (already handled in :meth:`_load_model`).
+        2. During segment generation — this method handles that case by
+           catching the error, unloading the CUDA model, and reloading
+           on CPU. The audio file is re-transcribed from scratch (this
+           is unavoidable since faster-whisper doesn't support resuming
+           mid-stream).
+        """
+        # Make sure the right model is loaded for the current device.
         self._load_model()
 
+        try:
+            return self._run_transcription(audio_path, lang)
+        except _CUDA_OOM_ERRORS as exc:
+            if self._device != "cuda":
+                # Already on CPU — nothing to fall back to.
+                raise TranscriptionError(
+                    f"CUDA OOM on CPU device (unexpected): {exc}"
+                ) from exc
+            logger.warning(
+                "CUDA OOM during transcription (%s) — falling back to CPU. "
+                "Re-transcribing the whole file (slower but reliable).",
+                exc,
+            )
+            # Unload the CUDA model, reload on CPU, retry.
+            self.unload()
+            self._device = "cpu"
+            self._load_model()
+            return self._run_transcription(audio_path, lang)
+
+    def _run_transcription(
+        self,
+        audio_path: Path,
+        lang: str | None,
+    ) -> TranscriptionResult:
+        """Single transcription pass on the currently-loaded model."""
         t0 = time.time()
-        logger.info("Transcribing %s (lang=%s)…", audio_path.name, lang or "auto")
+        logger.info(
+            "Transcribing %s on %s (lang=%s, beam=%d, chunk_length=%s)…",
+            audio_path.name, self._device, lang or "auto",
+            self.beam_size,
+            f"{self.chunk_length}s" if self.chunk_length else "auto",
+        )
 
         segments_raw, info = self._model.transcribe(
             str(audio_path),
             language=lang,
             beam_size=self.beam_size,
             vad_filter=self.vad_filter,
+            chunk_length=self.chunk_length,
             word_timestamps=False,   # segment-level is enough for our use case
         )
 
-        # faster-whisper returns a generator — consume it
+        # faster-whisper returns a generator — consume it inside the
+        # try/except so we can catch CUDA OOM mid-stream.
         segments: list[Segment] = []
         full_text_parts: list[str] = []
 
@@ -161,12 +229,11 @@ class FasterWhisperTranscriber(BaseTranscriber):
         elapsed = time.time() - t0
 
         logger.info(
-            "Transcription done in %.1fs — lang=%s (p=%.2f) segments=%d tokens≈%d",
-            elapsed,
-            info.language,
-            info.language_probability,
-            len(segments),
-            len(full_text) // 4,
+            "Transcription done in %.1fs on %s — lang=%s (p=%.2f) "
+            "segments=%d tokens≈%d",
+            elapsed, self._device,
+            info.language, info.language_probability,
+            len(segments), len(full_text) // 4,
         )
 
         return TranscriptionResult(
@@ -277,18 +344,20 @@ def create_transcriber(
     model_size: ModelSize = "large-v3",
     device: str = "auto",
     compute_type: str = "int8",
-    beam_size: int = 5,
+    beam_size: int = 3,
     language: str | None = None,
     vad_filter: bool = True,
+    chunk_length: int | None = None,
 ) -> FasterWhisperTranscriber:
     """
     Convenience factory — reads environment variables as defaults.
 
     Environment variables (all optional, override by keyword arg):
-    - ``WHISPER_MODEL``        → model_size
-    - ``WHISPER_DEVICE``       → device
-    - ``WHISPER_COMPUTE_TYPE`` → compute_type
-    - ``WHISPER_LANGUAGE``     → language (empty string = None)
+    - ``WHISPER_MODEL``         → model_size
+    - ``WHISPER_DEVICE``        → device
+    - ``WHISPER_COMPUTE_TYPE``  → compute_type
+    - ``WHISPER_LANGUAGE``      → language (empty string = None)
+    - ``WHISPER_CHUNK_LENGTH``  → chunk_length (seconds, empty = auto)
     """
     import os
     model_size   = os.getenv("WHISPER_MODEL",        model_size)
@@ -296,6 +365,12 @@ def create_transcriber(
     compute_type = os.getenv("WHISPER_COMPUTE_TYPE", compute_type)
     lang_env     = os.getenv("WHISPER_LANGUAGE",     "")
     language     = lang_env if lang_env else language
+    chunk_env    = os.getenv("WHISPER_CHUNK_LENGTH", "")
+    if chunk_env:
+        try:
+            chunk_length = int(chunk_env)
+        except ValueError:
+            chunk_length = None
 
     return FasterWhisperTranscriber(
         model_size=model_size,
@@ -304,7 +379,38 @@ def create_transcriber(
         beam_size=beam_size,
         language=language,
         vad_filter=vad_filter,
+        chunk_length=chunk_length,
     )
+
+
+# ---------------------------------------------------------------------------
+# CUDA OOM detection (best-effort, optional torch)
+# ---------------------------------------------------------------------------
+
+def _build_cuda_oom_errors() -> tuple[type[BaseException], ...]:
+    """
+    Return a tuple of exception classes that signal a CUDA OOM.
+
+    Tries to import torch and grab ``torch.cuda.OutOfMemoryError``. If torch
+    is not installed, returns an empty tuple — the OOM fallback path
+    simply won't be triggered (which is fine, since OOMs are impossible
+    without CUDA).
+    """
+    errs: list[type[BaseException]] = [RuntimeError]   # fallback: any RuntimeError
+    try:
+        import torch
+        # torch.cuda.OutOfMemoryError exists in modern torch (>=1.13).
+        if hasattr(torch.cuda, "OutOfMemoryError"):
+            oom = torch.cuda.OutOfMemoryError
+            if isinstance(oom, type) and issubclass(oom, BaseException):
+                errs.insert(0, oom)
+    except ImportError:
+        pass
+    return tuple(errs)
+
+
+#: Exceptions that trigger the CUDA → CPU fallback.
+_CUDA_OOM_ERRORS: tuple[type[BaseException], ...] = _build_cuda_oom_errors()
 
 
 # ---------------------------------------------------------------------------

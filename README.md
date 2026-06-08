@@ -335,7 +335,7 @@ transcription:
   model: large-v3
   device: cuda
   compute_type: int8
-  beam_size: 5
+  beam_size: 3          # lowered from 5 to fit tight-VRAM GPUs (e.g. GTX 1050 4 Go)
   language: null  # null = auto-détection
   word_timestamps: true
 
@@ -423,6 +423,13 @@ yt-insight all "URL" --no-console
 
 # Plusieurs formats de sortie
 yt-insight all "URL" --format markdown --format json
+
+# Forcer des chunks audio plus petits (utile sur GPU 4 Go type GTX 1050)
+yt-insight all "URL" --whisper-chunk-length 20
+
+# Le transcriber fallback automatiquement sur CPU si OOM CUDA, mais on peut
+# aussi forcer le CPU dès le départ via variable d'env (no GPU dispo / voulu)
+WHISPER_DEVICE=cpu yt-insight all "URL"
 
 # Estimer le coût d'une vidéo SANS lancer le pipeline (juste métadonnées yt-dlp)
 yt-insight estimate "https://youtube.com/watch?v=VIDEO_ID"
@@ -663,8 +670,9 @@ t = FasterWhisperTranscriber(
     model_size="large-v3",   # ou "medium" si mémoire limitée
     device="auto",           # "auto" → CUDA si dispo, sinon CPU
     compute_type="int8",     # int8 = ~2.5 Go VRAM sur GTX 1650 Super
-    beam_size=5,
+    beam_size=3,             # 3 = bon compromis qualité/mémoire (5 = trop pour 4 Go)
     language=None,           # None = auto-détection
+    chunk_length=None,       # None = auto (30s). Mettre 20 sur GTX 1050 pour éviter OOM.
     vad_filter=True,         # skip les silences → plus rapide
 )
 
@@ -702,9 +710,13 @@ TestTranscribe         — 9 tests  (résultat, texte, segments, langue, durée,
 TestUnload             — 3 tests  (clear, idempotent, flush CUDA)
 TestCudaFallback       — 1 test   (OOM → retry CPU)
 TestCreateTranscriber  — 3 tests  (defaults, env vars, langue vide)
+TestOomFallback        — 3 tests  (CUDA OOM → CPU auto, OOM on CPU raises, no-OOM path)
+TestChunkLength        — 6 tests  (default None, custom, passed to model, env var, beam=3 default)
 ```
 
 > Tous les tests mockent `WhisperModel` — aucun téléchargement de modèle requis pour les faire tourner.
+
+**Gestion robuste des OOM CUDA** : si l'inférence OOM en plein milieu de la génération d'un segment (pas juste au chargement), le transcriber détecte le `RuntimeError`, décharge le modèle, recharge sur CPU, et re-transcrit le fichier. La transparence est totale pour l'utilisateur. C'est particulièrement utile sur les GPU 4 Go comme la GTX 1050 avec large-v3.
 
 ---
 
@@ -842,7 +854,7 @@ Cinq dataclasses immutables composent `AppConfig` :
 |-----------------------|----------------------------------------------------------------|
 | `PathsConfig`         | `output_dir`, `cache_dir`, `keep_audio`                        |
 | `PipelineConfig`      | `steps: list[str]`, `fail_fast: bool`                          |
-| `TranscriptionConfig` | `model`, `device`, `compute_type`, `beam_size`, `language`, `vad_filter` |
+| `TranscriptionConfig` | `model`, `device`, `compute_type`, `beam_size`, `language`, `vad_filter`, `chunk_length` |
 | `AnalysisConfig`      | `max_transcript_tokens`, `overflow_strategy`, `outputs`        |
 | `OutputConfig`        | `formats`, `include_transcript`, `include_timestamps`          |
 
@@ -868,7 +880,7 @@ transcription:
   model: large-v3
   device: cuda
   compute_type: int8
-  beam_size: 5
+  beam_size: 3            # lowered from 5 to fit 4 Go VRAM cards
   language: fr          # ou null pour auto-détection
   vad_filter: true
 

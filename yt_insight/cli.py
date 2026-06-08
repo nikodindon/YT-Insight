@@ -195,6 +195,11 @@ def estimate(
 def transcribe(
     source: str = typer.Argument(..., help="Local audio path OR YouTube URL."),
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Force ISO 639-1 language."),
+    whisper_chunk_length: Optional[int] = typer.Option(
+        None, "--whisper-chunk-length",
+        help="Max audio chunk length in seconds (default: faster-whisper's 30s). "
+             "Lower this (e.g. 20) on GPUs with tight VRAM to avoid OOM.",
+    ),
     output_json: Optional[Path] = typer.Option(None, "--output", "-o", help="Write the transcript to this JSON file."),
     config: Optional[Path] = typer.Option(None, "--config"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -222,6 +227,7 @@ def transcribe(
         device=app_cfg.transcription.device,
         compute_type=app_cfg.transcription.compute_type,
         language=language or app_cfg.transcription.language,
+        chunk_length=whisper_chunk_length,
     )
 
     t0 = time.time()
@@ -259,6 +265,10 @@ def analyze(
     transcript_file: Optional[Path] = typer.Argument(None, help="JSON file produced by `transcribe --output`."),
     audio: Optional[str] = typer.Option(None, "--audio", help="Local audio path OR YouTube URL (will transcribe first)."),
     language: Optional[str] = typer.Option(None, "--language", "-l"),
+    whisper_chunk_length: Optional[int] = typer.Option(
+        None, "--whisper-chunk-length",
+        help="Max audio chunk length in seconds (default: 30).",
+    ),
     output_dir: Optional[Path] = typer.Option(None, "--output-dir"),
     format: list[str] = typer.Option(["markdown", "json"], "--format", help="Output formats: markdown, json."),
     no_console: bool = typer.Option(False, "--no-console", help="Skip the Rich console rendering."),
@@ -306,6 +316,7 @@ def analyze(
             device=app_cfg.transcription.device,
             compute_type=app_cfg.transcription.compute_type,
             language=language or app_cfg.transcription.language,
+            chunk_length=whisper_chunk_length,
         )
         transcription = transcriber.transcribe(audio_path, language=language)
         transcriber.unload()
@@ -363,6 +374,11 @@ def all(  # noqa: A001 — `all` is the command name users will type
         help="Subset of: download, transcribe, analyze. Repeat the flag or "
              "pass a comma-separated list.",
     ),
+    whisper_chunk_length: Optional[int] = typer.Option(
+        None, "--whisper-chunk-length",
+        help="Max audio chunk length in seconds (default: 30). "
+             "Lower this (e.g. 20) on tight-VRAM GPUs to avoid OOM.",
+    ),
     llamacpp_url: Optional[str] = typer.Option(None, "--llamacpp-url"),
     llamacpp_model: Optional[str] = typer.Option(None, "--llamacpp-model"),
     no_console: bool = typer.Option(False, "--no-console"),
@@ -417,6 +433,7 @@ def all(  # noqa: A001 — `all` is the command name users will type
             device=app_cfg.transcription.device,
             compute_type=app_cfg.transcription.compute_type,
             language=language or app_cfg.transcription.language,
+            chunk_length=whisper_chunk_length,
         )
         t0 = time.time()
         transcription = transcriber.transcribe(dl.audio_path, language=language)

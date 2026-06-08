@@ -403,3 +403,138 @@ class TestCreateTranscriber:
         monkeypatch.setenv("WHISPER_LANGUAGE", "")
         t = create_transcriber(language=None)
         assert t.language is None
+
+
+# ---------------------------------------------------------------------------
+# OOM fallback during transcription
+# ---------------------------------------------------------------------------
+
+class TestOomFallback:
+    """Verify that a RuntimeError (CUDA OOM) during the generator
+    consumption triggers an automatic CUDA → CPU fallback."""
+
+    def test_oom_in_segment_consumption_falls_back_to_cpu(self, transcriber, tmp_audio):
+        from yt_insight.transcriber.faster_whisper_transcriber import (
+            TranscriptionError,
+        )
+
+        # Force device to cuda (we never actually use a real GPU).
+        transcriber._device = "cuda"
+
+        call_count = {"n": 0}
+
+        def oom_then_ok(*args, **kwargs):
+            """First call OOMs, second call returns the fake segments."""
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("CUDA failed with error out of memory")
+            return iter([
+                SimpleNamespace(start=0.0, end=2.0, text="Recovered on CPU"),
+            ]), SimpleNamespace(
+                language="en", language_probability=0.9, duration=2.0,
+            )
+
+        mock_model = MagicMock()
+        mock_model.transcribe = MagicMock(side_effect=oom_then_ok)
+
+        with patch(
+            "yt_insight.transcriber.faster_whisper_transcriber.WhisperModel",
+            return_value=mock_model,
+        ):
+            with patch.object(transcriber, "unload") as mock_unload:
+                result = transcriber.transcribe(tmp_audio)
+
+        # We got 2 transcription calls (cuda fail + cpu ok).
+        assert call_count["n"] == 2
+        # Device should now be CPU after fallback.
+        assert transcriber._device == "cpu"
+        # Model was unloaded + reloaded between attempts.
+        mock_unload.assert_called_once()
+        # Result comes from the second (CPU) call.
+        assert result.text == "Recovered on CPU"
+        assert result.language == "en"
+
+    def test_oom_on_cpu_raises_transcription_error(self, transcriber, tmp_audio):
+        # If we're already on CPU and still OOM, raise cleanly.
+        transcriber._device = "cpu"
+
+        def always_oom(*args, **kwargs):
+            raise RuntimeError("CUDA failed with error out of memory")
+
+        mock_model = MagicMock()
+        mock_model.transcribe = MagicMock(side_effect=always_oom)
+
+        with patch(
+            "yt_insight.transcriber.faster_whisper_transcriber.WhisperModel",
+            return_value=mock_model,
+        ):
+            with pytest.raises(Exception) as exc_info:
+                transcriber.transcribe(tmp_audio)
+        # Should be a TranscriptionError (or RuntimeError wrapping it).
+        # We just check that the message mentions CPU and OOM.
+        assert "OOM" in str(exc_info.value) or "CPU" in str(exc_info.value)
+
+    def test_no_oom_path_works_as_before(self, transcriber, tmp_audio):
+        """The non-OOM path should not trigger any fallback dance."""
+        transcriber._device = "cuda"
+        mock_model = MagicMock()
+        mock_model.transcribe = MagicMock(side_effect=fake_model_transcribe)
+
+        with patch(
+            "yt_insight.transcriber.faster_whisper_transcriber.WhisperModel",
+            return_value=mock_model,
+        ):
+            result = transcriber.transcribe(tmp_audio)
+
+        # Should still be on cuda (no fallback happened).
+        assert transcriber._device == "cuda"
+        assert mock_model.transcribe.call_count == 1
+        # And we got the normal transcription.
+        assert "Bonjour tout le monde" in result.text
+
+
+# ---------------------------------------------------------------------------
+# chunk_length parameter
+# ---------------------------------------------------------------------------
+
+class TestChunkLength:
+    """Verify that chunk_length is exposed and passed through to faster-whisper."""
+
+    def test_default_chunk_length_is_none(self, transcriber):
+        assert transcriber.chunk_length is None
+
+    def test_custom_chunk_length_stored(self):
+        t = FasterWhisperTranscriber(
+            model_size="medium", device="cpu", compute_type="int8",
+            chunk_length=15,
+        )
+        assert t.chunk_length == 15
+
+    def test_chunk_length_passed_to_model(self, transcriber, tmp_audio):
+        transcriber.chunk_length = 20
+        mock_model = MagicMock()
+        mock_model.transcribe = MagicMock(side_effect=fake_model_transcribe)
+
+        with patch(
+            "yt_insight.transcriber.faster_whisper_transcriber.WhisperModel",
+            return_value=mock_model,
+        ):
+            transcriber.transcribe(tmp_audio, language="en")
+
+        # Inspect the call kwargs to faster-whisper.
+        call_kwargs = mock_model.transcribe.call_args.kwargs
+        assert call_kwargs.get("chunk_length") == 20
+
+    def test_chunk_length_env_var(self, monkeypatch):
+        monkeypatch.setenv("WHISPER_CHUNK_LENGTH", "25")
+        t = create_transcriber()
+        assert t.chunk_length == 25
+
+    def test_chunk_length_env_var_invalid_falls_back_to_none(self, monkeypatch):
+        monkeypatch.setenv("WHISPER_CHUNK_LENGTH", "not_a_number")
+        t = create_transcriber()
+        assert t.chunk_length is None
+
+    def test_default_beam_size_is_3(self, transcriber):
+        # We lowered the default from 5 to 3 to fit tight-VRAM GPUs.
+        assert transcriber.beam_size == 3
