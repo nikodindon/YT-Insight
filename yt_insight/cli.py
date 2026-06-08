@@ -195,6 +195,11 @@ def estimate(
 def transcribe(
     source: str = typer.Argument(..., help="Local audio path OR YouTube URL."),
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Force ISO 639-1 language."),
+    whisper_model: Optional[str] = typer.Option(
+        None, "--whisper-model",
+        help="Whisper model size: tiny, base, small, medium, large-v1, large-v2, large-v3, "
+             "distil-large-v2, distil-large-v3. Default from config (large-v3).",
+    ),
     whisper_chunk_length: Optional[int] = typer.Option(
         None, "--whisper-chunk-length",
         help="Max audio chunk length in seconds (default: faster-whisper's 30s). "
@@ -223,7 +228,7 @@ def transcribe(
         title = audio_path.stem
 
     transcriber = create_transcriber(
-        model_size=app_cfg.transcription.model,
+        model_size=whisper_model or app_cfg.transcription.model,
         device=app_cfg.transcription.device,
         compute_type=app_cfg.transcription.compute_type,
         language=language or app_cfg.transcription.language,
@@ -265,6 +270,10 @@ def analyze(
     transcript_file: Optional[Path] = typer.Argument(None, help="JSON file produced by `transcribe --output`."),
     audio: Optional[str] = typer.Option(None, "--audio", help="Local audio path OR YouTube URL (will transcribe first)."),
     language: Optional[str] = typer.Option(None, "--language", "-l"),
+    whisper_model: Optional[str] = typer.Option(
+        None, "--whisper-model",
+        help="Whisper model size (only used if --audio is set).",
+    ),
     whisper_chunk_length: Optional[int] = typer.Option(
         None, "--whisper-chunk-length",
         help="Max audio chunk length in seconds (default: 30).",
@@ -317,7 +326,7 @@ def analyze(
             audio_path = Path(audio)
             title = audio_path.stem
         transcriber = create_transcriber(
-            model_size=app_cfg.transcription.model,
+            model_size=whisper_model or app_cfg.transcription.model,
             device=app_cfg.transcription.device,
             compute_type=app_cfg.transcription.compute_type,
             language=language or app_cfg.transcription.language,
@@ -379,6 +388,13 @@ def all(  # noqa: A001 — `all` is the command name users will type
         "--steps",
         help="Subset of: download, transcribe, analyze. Repeat the flag or "
              "pass a comma-separated list.",
+    ),
+    whisper_model: Optional[str] = typer.Option(
+        None, "--whisper-model",
+        help="Whisper model size: tiny, base, small, medium, large-v1/v2/v3, "
+             "distil-large-v2/v3. Default from config (large-v3). "
+             "Try 'medium' (1.5 Go VRAM) or 'distil-large-v3' (~1.5 Go, 1.5x faster than large-v3) "
+             "on tight-VRAM GPUs.",
     ),
     whisper_chunk_length: Optional[int] = typer.Option(
         None, "--whisper-chunk-length",
@@ -450,7 +466,7 @@ def all(  # noqa: A001 — `all` is the command name users will type
             )
         else:
             transcriber = create_transcriber(
-                model_size=app_cfg.transcription.model,
+                model_size=whisper_model or app_cfg.transcription.model,
                 device=app_cfg.transcription.device,
                 compute_type=app_cfg.transcription.compute_type,
                 language=language or app_cfg.transcription.language,

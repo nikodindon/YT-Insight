@@ -431,6 +431,79 @@ class TestMisc:
         # setup_logging("DEBUG") was called for verbose
         mock_setup.assert_any_call("DEBUG")
 
+    def test_whisper_model_cli_flag_overrides_config(
+        self, tmp_path, fake_analysis,
+    ):
+        # When --whisper-model is passed, the transcriber should be
+        # instantiated with that model — not the one from config.
+        audio = tmp_path / "fake.mp3"
+        audio.write_bytes(b"fake")
+        with patch("yt_insight.cli.create_transcriber") as mock_create_t, \
+             patch("yt_insight.cli.create_analyzer") as mock_create_a:
+            from yt_insight.transcriber import TranscriptionResult
+            mock_t = MagicMock()
+            mock_t.transcribe.return_value = TranscriptionResult(
+                text="hi", segments=[], language="en",
+                language_probability=0.9, duration_seconds=10.0,
+                model_name="medium",
+            )
+            mock_create_t.return_value = mock_t
+            mock_a = MagicMock()
+            mock_a.__enter__ = MagicMock(return_value=mock_a)
+            mock_a.__exit__ = MagicMock(return_value=False)
+            mock_a.analyze.return_value = fake_analysis
+            mock_a.model_name = "M"
+            mock_a.backend_name = "B"
+            mock_create_a.return_value = mock_a
+
+            result = runner.invoke(app, [
+                "transcribe", str(audio),
+                "--language", "en",
+                "--whisper-model", "medium",
+                "--output", str(tmp_path / "out.json"),
+            ])
+
+        assert result.exit_code == 0, result.stdout
+        # The model passed to create_transcriber should be "medium".
+        call_kwargs = mock_create_t.call_args.kwargs
+        assert call_kwargs["model_size"] == "medium"
+
+    def test_whisper_model_default_uses_config(
+        self, tmp_path, fake_analysis,
+    ):
+        # When --whisper-model is NOT passed, the config value should
+        # be used (defaults to large-v3 in TranscriptionConfig).
+        audio = tmp_path / "fake.mp3"
+        audio.write_bytes(b"fake")
+        with patch("yt_insight.cli.create_transcriber") as mock_create_t, \
+             patch("yt_insight.cli.create_analyzer") as mock_create_a:
+            from yt_insight.transcriber import TranscriptionResult
+            mock_t = MagicMock()
+            mock_t.transcribe.return_value = TranscriptionResult(
+                text="hi", segments=[], language="en",
+                language_probability=0.9, duration_seconds=10.0,
+                model_name="large-v3",
+            )
+            mock_create_t.return_value = mock_t
+            mock_a = MagicMock()
+            mock_a.__enter__ = MagicMock(return_value=mock_a)
+            mock_a.__exit__ = MagicMock(return_value=False)
+            mock_a.analyze.return_value = fake_analysis
+            mock_a.model_name = "M"
+            mock_a.backend_name = "B"
+            mock_create_a.return_value = mock_a
+
+            result = runner.invoke(app, [
+                "transcribe", str(audio),
+                "--language", "en",
+                "--output", str(tmp_path / "out.json"),
+            ])
+
+        assert result.exit_code == 0, result.stdout
+        call_kwargs = mock_create_t.call_args.kwargs
+        # Default model from TranscriptionConfig.
+        assert call_kwargs["model_size"] == "large-v3"
+
 
 # ---------------------------------------------------------------------------
 # estimate

@@ -49,10 +49,12 @@ Chaque étape est modulaire, testable indépendamment, et configurable pour tour
 | **Analyzer**    | `analyzer/{base,prompts,llamacpp_local}.py`     | 25 ✅   | **Terminé**   |
 | **Utils**       | `utils/{text_utils,config,logger}.py`           | 41 ✅   | **Terminé**   |
 | **Output**      | `output/{console,file_writer}.py`               | 21 ✅   | **Terminé**   |
-| **CLI**         | `cli.py` (5 sous-commandes Typer)               | 20 ✅   | **Terminé**   |
+| **CLI**         | `cli.py` (5 sous-commandes Typer)               | 22 ✅   | **Terminé**   |
 | **Estimate**    | `estimate.py` + 3 tests CLI                    | 24 ✅   | **Terminé**   |
 
-Total : **198 tests passent** (`pytest tests/ -q`).
+Total : **200 tests passent** (`pytest tests/ -q`).
+
+Voir aussi [`docs/ROADMAP.md`](docs/ROADMAP.md) pour les tickets à venir (streaming SSE, playlists, PDF, etc.).
 
 ---
 
@@ -197,7 +199,7 @@ yt-insight/
 │   ├── test_text_utils.py         ✅ créé  (19 tests)
 │   ├── test_config.py             ✅ créé  (22 tests, config + logger)
 │   ├── test_output.py             ✅ créé  (21 tests, console + file_writer)
-│   ├── test_cli.py                ✅ créé  (20 tests, Typer CliRunner)
+│   ├── test_cli.py                ✅ créé  (22 tests, Typer CliRunner)
 │   ├── test_estimate.py           ✅ créé  (24 tests, prédiction de coût)
 │   └── fixtures/
 │       └── sample_transcript.txt  🔜 à créer
@@ -426,6 +428,12 @@ yt-insight all "URL" --format markdown --format json
 
 # Forcer des chunks audio plus petits (utile sur GPU 4 Go type GTX 1050)
 yt-insight all "URL" --whisper-chunk-length 20
+
+# Utiliser un modèle Whisper plus léger (medium = 1.5 Go VRAM, distil-large-v3 = 1.5 Go + 1.5x plus rapide)
+yt-insight all "URL" --whisper-model medium
+yt-insight all "URL" --whisper-model distil-large-v3
+# Combiné avec --whisper-chunk-length, ça permet de tenir en VRAM 4 Go sans OOM
+yt-insight all "URL" --whisper-model medium --whisper-chunk-length 30
 
 # Le transcriber fallback automatiquement sur CPU si OOM CUDA, mais on peut
 # aussi forcer le CPU dès le départ via variable d'env (no GPU dispo / voulu)
@@ -1184,7 +1192,7 @@ TestConstants          — 6 tests  (ordres RTFX, TPS, WPM, sanity)
 - [ ] Recherche full-text dans les transcriptions
 
 ### Phase 4 — Qualité
-- [x] Suite de tests complète (198/198 ✅)
+- [x] Suite de tests complète (200/200 ✅)
 - [ ] CI/CD GitHub Actions
 - [ ] Dockerisation
 - [ ] Packaging PyPI
