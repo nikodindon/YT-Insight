@@ -96,6 +96,69 @@ _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON_RE = re.compile(r"(\{.*\})", re.DOTALL)
 
 
+def _balanced_json_object(text: str) -> str | None:
+    """
+    Return the first balanced ``{...}`` substring, correctly handling
+    nested braces **and** strings (with escapes). Returns ``None`` if
+    no balanced object is found.
+
+    This is the most reliable extractor when the model emits
+    multiline JSON with literal newlines or unescaped quotes inside
+    string values.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _write_debug_response(text: str, err: Exception) -> Path | None:
+    """
+    Save the raw model response to ``cache/debug/{timestamp}.txt`` for
+    post-mortem analysis when JSON extraction fails. Returns the path
+    or ``None`` if writing is impossible.
+    """
+    try:
+        from datetime import datetime
+        debug_dir = Path("cache") / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = debug_dir / f"{ts}.txt"
+        path.write_text(
+            f"--- ERROR ---\n{type(err).__name__}: {err}\n"
+            f"--- LENGTH ---\n{len(text)} chars\n"
+            f"--- FIRST 200 ---\n{text[:200]!r}\n"
+            f"--- LAST 200 ---\n{text[-200:]!r}\n"
+            f"--- FULL ---\n{text}\n",
+            encoding="utf-8",
+        )
+        return path
+    except Exception:
+        return None
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     """
     Find the first JSON object in *text* and parse it.
@@ -120,19 +183,45 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # 3. Fall back to "find the outermost { ... }" by trying every
-    #    candidate prefix/suffix.
-    for match in _BARE_JSON_RE.finditer(text):
-        candidate = match.group(1)
+    # 3. Fall back to balanced-brace matching: handles nested objects
+    #    and strings (with escapes) correctly. Most reliable for
+    #    multi-line JSON with literal newlines or unescaped quotes.
+    candidate = _balanced_json_object(text)
+    if candidate is not None:
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
-            continue
+            pass
 
-    raise AnalysisError(
+    # 4. Last resort: try ``json_repair`` (if available) which fixes
+    #    common issues like trailing commas, single quotes, unescaped
+    #    newlines in strings, missing closing braces, etc.
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(
+            json_str=text,
+            return_objects=True,
+            ensure_ascii=False,
+        )
+        if isinstance(repaired, dict):
+            return repaired
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # All extraction strategies failed. Save the raw response for
+    # post-mortem and raise a clear error.
+    err = AnalysisError(
         f"Could not extract a JSON object from the model response "
         f"({len(text)} chars). First 200 chars: {text[:200]!r}"
     )
+    debug_path = _write_debug_response(text, err)
+    if debug_path is not None:
+        err = AnalysisError(
+            f"{err}. Raw response saved to {debug_path}."
+        )
+    raise err
 
 
 # ---------------------------------------------------------------------------

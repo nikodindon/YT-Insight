@@ -613,3 +613,58 @@ class TestStreamingChat:
         assert a.timeout_s == 7200.0
         assert a.idle_timeout_s == 1800.0
         assert a.max_prompt_tokens == 50000
+
+
+# -------------------------------------------------------------------
+# Tolerant JSON extraction
+# -------------------------------------------------------------------
+
+class TestExtractJsonObjectTolerant:
+
+    def _extract(self, text):
+        from yt_insight.analyzer.llamacpp_local import _extract_json_object
+        return _extract_json_object(text)
+
+    def test_well_formed_json(self):
+        d = self._extract('{"summary": "x", "key_points": [], "quotes": []}')
+        assert d == {"summary": "x", "key_points": [], "quotes": []}
+
+    def test_nested_objects(self):
+        d = self._extract(
+            '{"summary": "x", "analysis": {"forces": "f", "concepts": ["a"]}}'
+        )
+        assert d["analysis"]["concepts"] == ["a"]
+
+    def test_fenced_json_block(self):
+        text = (
+            "Here is the analysis:\n\n"
+            "```json\n"
+            '{"summary": "x", "key_points": []}\n'
+            "```\n"
+        )
+        d = self._extract(text)
+        assert d["summary"] == "x"
+
+    def test_truncated_json_repaired(self):
+        """Model hit max_tokens and emitted a partial JSON object."""
+        d = self._extract(
+            '{"summary": "long text", "key_points": ["a", "b", "c"'
+        )
+        # json_repair should recover what it can.
+        assert d["summary"] == "long text"
+        assert "a" in d["key_points"]
+
+    def test_literal_newline_in_string_repaired(self):
+        """LLMs often emit literal \\n inside JSON strings."""
+        d = self._extract(
+            '{"summary": "Line 1\nLine 2\nLine 3", "key_points": []}'
+        )
+        assert "Line 1" in d["summary"]
+        assert "Line 3" in d["summary"]
+
+    def test_trailing_comma_repaired(self):
+        d = self._extract(
+            '{"summary": "x", "key_points": [], "quotes": [],}'
+        )
+        assert d["summary"] == "x"
+        assert d["quotes"] == []
