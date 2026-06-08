@@ -279,6 +279,22 @@ class TestWriteOutputs:
         write_outputs(analysis, new_dir, title="X")
         assert new_dir.exists()
 
+    def test_tag_appended_on_collision(self, analysis, tmp_path):
+        """Running twice with a different tag should not overwrite."""
+        p1 = write_outputs(analysis, tmp_path, title="X", tag="v1")
+        p2 = write_outputs(analysis, tmp_path, title="X", tag="v2")
+        md1, md2 = p1["markdown"], p2["markdown"]
+        assert md1 != md2
+        assert "-v1" in md1.name
+        assert "-v2" in md2.name
+        assert md1.exists() and md2.exists()
+
+    def test_no_tag_keeps_deterministic_path(self, analysis, tmp_path):
+        """Without a tag, two writes should land on the same file."""
+        p1 = write_outputs(analysis, tmp_path, title="X")
+        p2 = write_outputs(analysis, tmp_path, title="X")
+        assert p1["markdown"] == p2["markdown"]
+
     def test_with_video_metadata(self, analysis, tmp_path):
         # Build a minimal VideoMetadata-like object via duck typing
         # (to avoid a hard dep on downloader for the output tests).

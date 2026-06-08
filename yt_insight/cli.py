@@ -18,6 +18,7 @@ command line OR via environment variables / ``config.yaml``.
 from __future__ import annotations
 
 import json
+import re
 import logging
 import time
 from pathlib import Path
@@ -94,6 +95,35 @@ def _print_banner(console: Console, title: str) -> None:
             border_style="cyan",
         )
     )
+
+
+def _build_output_tag(analyzer, max_prompt_tokens: int) -> str:
+    """
+    Build a short disambiguation tag for output filenames.
+
+    Format: ``{model_short}-p{max_prompt_tokens//1000}k``,
+    e.g. ``qwen3-50k`` for the Qwen3 model with a 50k ctx cap.
+
+    This is appended to the filename when an output with the same
+    base name already exists, so the user can keep multiple
+    analyses of the same video side-by-side.
+
+    Defensive against mocks / partial analyzer objects: falls back
+    to ``"model"`` if the attribute is not a real string.
+    """
+    raw_model = getattr(analyzer, "_model", None) if analyzer else None
+    if not isinstance(raw_model, str):
+        model = "model"
+    else:
+        model = raw_model.lower()
+    # Strip common GGUF suffixes and qualifiers.
+    for suffix in (".gguf", "-ud", "-instruct", "-chat", "-base"):
+        if suffix in model:
+            model = model.split(suffix)[0]
+    # Keep just the first 12 chars of the model name.
+    model_short = re.sub(r"[^a-z0-9]+", "-", model).strip("-")[:12] or "model"
+    tok_k = max_prompt_tokens // 1000
+    return f"{model_short}-p{tok_k}k"
 
 
 def _print_kv(console: Console, items: list[tuple[str, str]]) -> None:
@@ -475,6 +505,7 @@ def analyze(
     # --- Step 4: write -------------------------------------------------
     if output_dir is None:
         output_dir = app_cfg.paths.output_dir
+    out_tag = _build_output_tag(analyzer, app_cfg.analysis.max_transcript_tokens)
     paths = write_outputs(
         analysis,
         output_dir,
@@ -485,6 +516,7 @@ def analyze(
         transcription=transcription if app_cfg.output.include_transcript else None,
         include_transcript=app_cfg.output.include_transcript,
         include_timestamps=app_cfg.output.include_timestamps,
+        tag=out_tag,
     )
     for kind, p in paths.items():
         console.print(f"  [green]✓[/green] {kind:<8} → {p}")
@@ -664,6 +696,7 @@ def all(  # noqa: A001 — `all` is the command name users will type
             ConsoleRenderer().render(analysis, transcription, video_url=url)
 
         # --- Step 5: write --------------------------------------------
+        out_tag = _build_output_tag(analyzer, app_cfg.analysis.max_transcript_tokens)
         paths_out = write_outputs(
             analysis,
             paths.output_dir,
@@ -674,6 +707,7 @@ def all(  # noqa: A001 — `all` is the command name users will type
             transcription=transcription if app_cfg.output.include_transcript else None,
             include_transcript=app_cfg.output.include_transcript,
             include_timestamps=app_cfg.output.include_timestamps,
+            tag=out_tag,
         )
         console.print()
         console.print("[bold green]💾 Fichiers écrits :[/bold green]")

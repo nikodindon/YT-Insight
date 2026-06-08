@@ -63,6 +63,23 @@ class FileWriter:
     # Public API
     # ------------------------------------------------------------------
 
+    def _build_path(self, title: str, ext: str, tag: str | None = None) -> Path:
+        """
+        Compute the output path for a given title and extension.
+
+        If ``tag`` is provided, it is always appended to the
+        filename. This guarantees that re-running the pipeline
+        with a different config (model, max_prompt_tokens, …)
+        produces a distinct output and never overwrites an
+        earlier one.
+        """
+        slug = _slugify(title or "untitled")
+        date = _today()
+        base = self.output_dir / f"{date}_{slug}"
+        if tag:
+            return Path(f"{base}-{tag}.{ext}")
+        return Path(f"{base}.{ext}")
+
     def write_markdown(
         self,
         analysis: "AnalysisResult",
@@ -71,11 +88,10 @@ class FileWriter:
         video_url: str = "",
         metadata: "VideoMetadata | None" = None,
         transcription: "TranscriptionResult | None" = None,
+        tag: str | None = None,
     ) -> Path:
         """Write a Markdown report. Returns the path of the file written."""
-        slug = _slugify(title or "untitled")
-        date = _today()
-        path = self.output_dir / f"{date}_{slug}.md"
+        path = self._build_path(title, "md", tag=tag)
         path.write_text(
             self._render_markdown(
                 analysis,
@@ -96,11 +112,10 @@ class FileWriter:
         video_url: str = "",
         metadata: "VideoMetadata | None" = None,
         transcription: "TranscriptionResult | None" = None,
+        tag: str | None = None,
     ) -> Path:
         """Write a strict-JSON dump. Returns the path of the file written."""
-        slug = _slugify(title or "untitled")
-        date = _today()
-        path = self.output_dir / f"{date}_{slug}.json"
+        path = self._build_path(title, "json", tag=tag)
         payload = self._build_json_payload(
             analysis,
             title=title,
@@ -278,6 +293,7 @@ def write_outputs(
     transcription: "TranscriptionResult | None" = None,
     include_transcript: bool = True,
     include_timestamps: bool = True,
+    tag: str | None = None,
 ) -> dict[str, Path]:
     """
     One-shot helper: write the requested formats and return the paths.
@@ -287,6 +303,11 @@ def write_outputs(
     formats:
         Any combination of ``"markdown"`` and ``"json"``.
         ``None`` defaults to ``["markdown", "json"]``.
+    tag:
+        Optional disambiguation tag appended to the filename when a
+        file with the same base name already exists. Use this to keep
+        multiple analyses of the same video side-by-side (e.g. one
+        per model / config).
     """
     if formats is None:
         formats = ["markdown", "json"]
@@ -302,11 +323,13 @@ def write_outputs(
             paths["markdown"] = writer.write_markdown(
                 analysis, title=title, video_url=video_url,
                 metadata=metadata, transcription=transcription,
+                tag=tag,
             )
         elif fmt == "json":
             paths["json"] = writer.write_json(
                 analysis, title=title, video_url=video_url,
                 metadata=metadata, transcription=transcription,
+                tag=tag,
             )
         else:
             raise ValueError(
