@@ -668,3 +668,64 @@ class TestExtractJsonObjectTolerant:
         )
         assert d["summary"] == "x"
         assert d["quotes"] == []
+
+
+# -------------------------------------------------------------------
+# CLI depth/sections propagation (regression for the Jancovici bug)
+# -------------------------------------------------------------------
+
+class TestCliDepthSectionsPropagation:
+    """
+    Regression: the 'yt-insight all --depth extreme' (no --sections)
+    run on the Jancovici video produced only the 3 NORMAL sections
+    (forces, concepts, implications) instead of the 8 expected for
+    extreme. Root cause: ``_validate_depth_sections`` was calling
+    ``coerce_sections(None)`` which returns the NORMAL default, so
+    the CLI overrode the depth's per-depth defaults.
+    """
+
+    def test_extreme_no_sections_returns_none(self):
+        from yt_insight.cli import _validate_depth_sections
+        depth_obj, sections = _validate_depth_sections("extreme", None)
+        assert depth_obj.value == "extreme"
+        assert sections is None  # so __init__ applies EXTREME's 8 sections
+
+    def test_extreme_empty_sections_returns_none(self):
+        from yt_insight.cli import _validate_depth_sections
+        depth_obj, sections = _validate_depth_sections("extreme", "")
+        assert depth_obj.value == "extreme"
+        assert sections is None
+
+    def test_extreme_explicit_sections_returns_tuple(self):
+        from yt_insight.cli import _validate_depth_sections
+        _, sections = _validate_depth_sections(
+            "extreme", "forces,weaknesses"
+        )
+        assert sections == ("forces", "weaknesses")
+
+    def test_invalid_sections_raises(self):
+        from yt_insight.cli import _validate_depth_sections
+        with pytest.raises(ValueError, match="Unknown section"):
+            _validate_depth_sections("extreme", "forces,bogus")
+
+    def test_extreme_no_sections_propagates_to_analyzer(self):
+        """
+        End-to-end: CLI validation + factory + __init__ must end up
+        with 8 sections for extreme when the user didn't pass --sections.
+        """
+        from yt_insight.cli import _validate_depth_sections
+        from yt_insight.analyzer.llamacpp_local import create_analyzer
+
+        depth_obj, sections = _validate_depth_sections("extreme", None)
+        a = create_analyzer(depth=depth_obj, sections=sections)
+        assert a.depth.value == "extreme"
+        assert len(a.sections) == 8
+
+    def test_shallow_no_sections_propagates_to_analyzer(self):
+        from yt_insight.cli import _validate_depth_sections
+        from yt_insight.analyzer.llamacpp_local import create_analyzer
+
+        depth_obj, sections = _validate_depth_sections("shallow", None)
+        a = create_analyzer(depth=depth_obj, sections=sections)
+        assert a.depth.value == "shallow"
+        assert len(a.sections) == 1  # just 'forces'

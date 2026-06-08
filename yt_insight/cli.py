@@ -102,12 +102,27 @@ def _validate_depth_sections(depth: str | None, sections: str | None) -> tuple:
     Validate --depth and --sections CLI values early so the user
     gets a clean error before any network call.
 
-    Returns ``(depth_obj, sections_tuple)``.
+    Returns ``(depth_obj, sections_or_sentinel)`` where
+    ``sections_or_sentinel`` is either:
+    - ``None`` if the user did not pass ``--sections`` (so the analyzer
+      applies the **depth-specific** default in ``__init__``)
+    - a tuple of names if the user passed ``--sections`` (any string
+      is coerced and validated here)
     """
-    from .analyzer.depth import coerce_depth, coerce_sections
+    from .analyzer.depth import coerce_depth
     depth_obj = coerce_depth(depth)
-    sections_tuple = coerce_sections(sections)
-    return depth_obj, sections_tuple
+    # If user didn't pass --sections, we MUST leave it as None so that
+    # ``LlamaCppLocalAnalyzer.__init__`` picks the right default per
+    # depth (e.g. 8 sections for extreme, 1 for shallow, ...).
+    # Calling ``coerce_sections(None)`` would incorrectly return the
+    # NORMAL default (3 sections), which is what used to happen.
+    if sections is None or sections == "":
+        sections_final = None
+    else:
+        # Validate now (coerce_sections raises ValueError on bad names).
+        from .analyzer.depth import coerce_sections
+        sections_final = coerce_sections(sections)
+    return depth_obj, sections_final
 
 
 def _build_output_tag(analyzer, max_prompt_tokens: int) -> str:
