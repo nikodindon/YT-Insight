@@ -541,10 +541,18 @@ class TestStreamingChat:
             result = analyzer._chat("hi")
         assert result == "abcdef"
 
-    def test_default_idle_timeout_is_10min(self):
+    def test_idle_timeout_default(self):
+        # 30 min default — large enough for very long prompt processing
+        # on consumer GPUs (observed 14 min for 30k tokens on GTX 1650S).
         from yt_insight.analyzer.llamacpp_local import DEFAULT_IDLE_TIMEOUT_S
         a = create_analyzer()
-        assert a.idle_timeout_s == DEFAULT_IDLE_TIMEOUT_S == 600.0
+        assert a.idle_timeout_s == DEFAULT_IDLE_TIMEOUT_S
+        assert a.idle_timeout_s >= 1800.0
+
+    def test_default_idle_timeout_is_10min(self):  # legacy name
+        from yt_insight.analyzer.llamacpp_local import DEFAULT_IDLE_TIMEOUT_S
+        a = create_analyzer()
+        assert a.idle_timeout_s == DEFAULT_IDLE_TIMEOUT_S
 
     def test_max_prompt_tokens_default_is_50k(self):
         from yt_insight.analyzer.llamacpp_local import DEFAULT_MAX_PROMPT_TOKENS
@@ -597,11 +605,11 @@ class TestStreamingChat:
         a = create_analyzer(
             base_url="http://x:8080",
             timeout_s=None,           # → DEFAULT_TIMEOUT_S (7200)
-            idle_timeout_s=None,      # → DEFAULT_IDLE_TIMEOUT_S (600)
+            idle_timeout_s=None,      # → DEFAULT_IDLE_TIMEOUT_S (1800)
             max_prompt_tokens=None,   # → DEFAULT_MAX_PROMPT_TOKENS (50000)
             depth="shallow",
             sections="forces",
         )
         assert a.timeout_s == 7200.0
-        assert a.idle_timeout_s == 600.0
+        assert a.idle_timeout_s == 1800.0
         assert a.max_prompt_tokens == 50000

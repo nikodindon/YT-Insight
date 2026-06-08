@@ -71,7 +71,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_MODEL = "Qwen3.6-35B-A3B-UD-IQ3_S.gguf"
 DEFAULT_TIMEOUT_S = 7200.0         # 2 h — long enough for 3h videos
-DEFAULT_IDLE_TIMEOUT_S = 600.0     # 10 min — long enough for prompt eval of big chunks
+DEFAULT_IDLE_TIMEOUT_S = 1800.0   # 30 min — covers prompt eval of very large chunks
+                                 # (observed 842s for ~30k tokens on GTX 1650S; 1800s gives 2x headroom)
 DEFAULT_MAX_PROMPT_TOKENS = 50_000 # 50k — safe under llama.cpp's 65k default ctx
 DEFAULT_CHUNK_OVERLAP_TOKENS = 500
 DEFAULT_TEMPERATURE = 0.2          # low for structured JSON

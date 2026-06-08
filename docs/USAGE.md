@@ -83,7 +83,7 @@ use 95% of the time.
 | `--llamacpp-url` | `http://localhost:8080` | OpenAI-compat server URL |
 | `--llamacpp-model` | Qwen3.6 35B-A3B | Model name as the server reports it |
 | `--llamacpp-timeout` | `7200` (2h) | Wall-clock HTTP timeout in seconds |
-| `--llamacpp-idle-timeout` | `600` (10 min) | Per-token idle timeout. Must be > your server's prompt processing time |
+| `--llamacpp-idle-timeout` | `1800` (30 min) | Per-token idle timeout. Must be > your server's prompt processing time. Observed 14 min for 30k tokens on a GTX 1650S. |
 | `--llamacpp-max-prompt-tokens` | `50000` | Soft cap; above this we switch to chunk+merge |
 
 **Analysis depth & sections (see [ANALYSIS_DEPTH.md](ANALYSIS_DEPTH.md)):**
@@ -222,10 +222,12 @@ Useful if your GPU is busy, or for guaranteed non-OOM runs.
 yt-insight all "URL" \
     --llamacpp-max-prompt-tokens 80000 \
     --llamacpp-timeout 14400 \
-    --llamacpp-idle-timeout 1200
+    --llamacpp-idle-timeout 1800
 ```
 
-`-c 100000` on the server side is recommended for very long videos.
+The 30-min idle timeout covers even the slowest prompt processing
+on consumer GPUs. `-c 100000` on the server side is recommended
+for very long videos.
 
 ### 8. Shallow analysis (TL;DR mode)
 
