@@ -190,7 +190,30 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         disable_thinking: bool = True,
         idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
         system_prompt: str | None = None,
+        depth: "Depth" = None,                  # see ``yt_insight.analyzer.depth``
+        sections: tuple[str, ...] | None = None,
     ):
+        from .depth import Depth, DEPTH_DEFAULT_SECTIONS, DEPTH_PRESETS, coerce_sections
+        if depth is None:
+            depth = Depth.NORMAL
+        if not isinstance(depth, Depth):
+            depth = Depth(str(depth).lower())
+
+        # When ``depth`` is given, the depth preset takes precedence
+        # over explicit temperature/max_tokens unless the user passed
+        # non-default values (we keep the user's choice if explicit).
+        preset = DEPTH_PRESETS[depth]
+        # If user kept the default temperature, override with preset.
+        if temperature == DEFAULT_TEMPERATURE:
+            temperature = float(preset["temperature"])  # type: ignore[arg-type]
+        # If user kept the default max_tokens, override with preset.
+        if max_tokens == DEFAULT_MAX_TOKENS:
+            max_tokens = int(preset["max_tokens"])  # type: ignore[arg-type]
+        if sections is None:
+            sections = DEPTH_DEFAULT_SECTIONS[depth]
+        else:
+            sections = coerce_sections(sections)
+
         self.base_url = base_url.rstrip("/")
         self._model = model
         self.timeout_s = timeout_s
@@ -201,6 +224,8 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         self.max_tokens = max_tokens
         self.disable_thinking = disable_thinking
         self.system_prompt = system_prompt or prompts.SYSTEM_PROMPT
+        self.depth = depth
+        self.sections = sections
 
         self._client: httpx.Client | None = None
         # Resolved at first call (after server handshake) — may differ
@@ -208,8 +233,10 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         self._resolved_model: str | None = None
 
         logger.info(
-            "LlamaCppLocalAnalyzer configured — url=%s model=%s max_prompt=%d tok",
+            "LlamaCppLocalAnalyzer configured — url=%s model=%s max_prompt=%d tok "
+            "depth=%s sections=%s",
             self.base_url, self._model, self.max_prompt_tokens,
+            self.depth.value, ",".join(self.sections),
         )
 
     # ------------------------------------------------------------------
@@ -301,6 +328,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
             payload = self._single_shot(
                 clean_text, title=title, language=lang_label,
                 duration=transcription.duration_str,
+                depth=self.depth, sections=self.sections,
                 on_token=on_token,
             )
         else:
@@ -312,6 +340,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                 title=title,
                 duration=transcription.duration_str,
                 language=lang_label,
+                depth=self.depth, sections=self.sections,
                 on_token=on_token,
             )
 
@@ -388,10 +417,13 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         title: str,
         duration: str,
         language: str,
+        depth,
+        sections: tuple[str, ...],
         on_token: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         user_prompt = prompts.build_analysis_prompt(
             text, title=title, duration=duration, language=language,
+            depth=depth, sections=sections,
         )
         content = self._chat(user_prompt, on_token=on_token)
         return _extract_json_object(content)
@@ -407,6 +439,8 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         title: str,
         duration: str,
         language: str,
+        depth,
+        sections: tuple[str, ...],
         on_token: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         # Use overlap = max(overlap, 5% of max_prompt_tokens) for long
@@ -431,6 +465,8 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                 title=title,
                 duration=duration,
                 language=language,
+                depth=depth,
+                sections=sections,
             )
             content = self._chat(user_prompt, on_token=on_token)
             # Keep the raw JSON blob for the merge prompt; we don't
@@ -440,6 +476,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
 
         merge_prompt = prompts.build_merge_prompt(
             partial_payloads, title=title, duration=duration, language=language,
+            depth=depth, sections=sections,
         )
         merged = self._chat(merge_prompt, on_token=on_token)
         return _extract_json_object(merged)

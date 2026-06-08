@@ -97,6 +97,19 @@ def _print_banner(console: Console, title: str) -> None:
     )
 
 
+def _validate_depth_sections(depth: str | None, sections: str | None) -> tuple:
+    """
+    Validate --depth and --sections CLI values early so the user
+    gets a clean error before any network call.
+
+    Returns ``(depth_obj, sections_tuple)``.
+    """
+    from .analyzer.depth import coerce_depth, coerce_sections
+    depth_obj = coerce_depth(depth)
+    sections_tuple = coerce_sections(sections)
+    return depth_obj, sections_tuple
+
+
 def _build_output_tag(analyzer, max_prompt_tokens: int) -> str:
     """
     Build a short disambiguation tag for output filenames.
@@ -431,6 +444,18 @@ def analyze(
         help="Soft cap on prompt tokens (default 50000). Above this we switch to "
              "chunk+merge. Must stay under your server's n_ctx.",
     ),
+    depth: Optional[str] = typer.Option(
+        None, "--depth",
+        help="Analysis depth preset: shallow | normal | deep | extreme. "
+             "Controls max_tokens, num_key_points, num_quotes, temperature. "
+             "Default: normal.",
+    ),
+    sections: Optional[str] = typer.Option(
+        None, "--sections",
+        help="Comma-separated analysis rubrics to include. Valid: forces, "
+             "concepts, implications, weaknesses, contradictions, biases, "
+             "limitations, context_gaps. Default: depends on --depth.",
+    ),
     config: Optional[Path] = typer.Option(None, "--config"),
 
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -480,12 +505,21 @@ def analyze(
         transcriber.unload()
 
     # --- Step 2: analyze -----------------------------------------------
+    # Validate depth + sections early (before any network call).
+    try:
+        depth_obj, sections_tuple = _validate_depth_sections(depth, sections)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+
     analyzer = create_analyzer(
         base_url=llamacpp_url,
         model=llamacpp_model,
         timeout_s=llamacpp_timeout,
         idle_timeout_s=llamacpp_idle_timeout,
         max_prompt_tokens=llamacpp_max_prompt_tokens,
+        depth=depth_obj,
+        sections=sections_tuple,
     )
     t0 = time.time()
     analysis = _run_analyze_with_live(
@@ -564,6 +598,16 @@ def all(  # noqa: A001 — `all` is the command name users will type
     llamacpp_max_prompt_tokens: Optional[int] = typer.Option(
         None, "--llamacpp-max-prompt-tokens",
         help="Soft cap on prompt tokens (default 50000).",
+    ),
+    depth: Optional[str] = typer.Option(
+        None, "--depth",
+        help="Analysis depth preset: shallow | normal | deep | extreme.",
+    ),
+    sections: Optional[str] = typer.Option(
+        None, "--sections",
+        help="Comma-separated analysis rubrics. Valid: forces, concepts, "
+             "implications, weaknesses, contradictions, biases, limitations, "
+             "context_gaps.",
     ),
     no_console: bool = typer.Option(False, "--no-console"),
     config: Optional[Path] = typer.Option(None, "--config"),
@@ -670,12 +714,20 @@ def all(  # noqa: A001 — `all` is the command name users will type
 
     # --- Step 3: analyze ----------------------------------------------
     if "analyze" in steps_set:
+        # Validate depth + sections early (before any network call).
+        try:
+            depth_obj, sections_tuple = _validate_depth_sections(depth, sections)
+        except ValueError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise typer.Exit(1)
         analyzer = create_analyzer(
             base_url=llamacpp_url,
             model=llamacpp_model,
             timeout_s=llamacpp_timeout,
             idle_timeout_s=llamacpp_idle_timeout,
             max_prompt_tokens=llamacpp_max_prompt_tokens,
+            depth=depth_obj,
+            sections=sections_tuple,
         )
         t0 = time.time()
         analysis = _run_analyze_with_live(

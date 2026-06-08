@@ -451,6 +451,24 @@ yt-insight all "URL" --llamacpp-idle-timeout 1200   # 20 min
 # Doit rester < n_ctx de votre llama-server.
 yt-insight all "URL" --llamacpp-max-prompt-tokens 80000
 
+# === Profondeur d'analyse (4 presets) ===
+# shallow  → 5 points clés, 3 citations, ~1024 tokens
+# normal   → 15 points clés, 5 citations, ~4096 tokens  (défaut)
+# deep     → 25 points clés, 10 citations, ~8192 tokens
+# extreme  → 40 points clés, 15 citations, ~16384 tokens
+yt-insight all "URL" --depth shallow        # analyse express
+yt-insight all "URL" --depth normal         # défaut
+yt-insight all "URL" --depth deep           # analyse fouillée
+yt-insight all "URL" --depth extreme        # tout, partout, en détail
+
+# === Sections d'analyse (8 rubriques) ===
+# Valid: forces, concepts, implications, weaknesses, contradictions,
+#        biases, limitations, context_gaps
+# Override les sections par défaut du depth.
+yt-insight all "URL" --sections forces,weaknesses,contradictions   # vue rhétorique
+yt-insight all "URL" --sections biases,contradictions,limitations   # esprit critique
+yt-insight all "URL" --depth extreme --sections forces              # extreme mais sobre
+
 # Pendant l'analyse, le panel Rich Live affiche les tokens en temps réel :
 #  ╭─ LLM generation ──────────────────────────────────────────╮
 #  │ The speaker Duhun, founder of Base 10, opens with his    │
@@ -1208,7 +1226,7 @@ TestConstants          — 6 tests  (ordres RTFX, TPS, WPM, sanity)
 - [ ] Recherche full-text dans les transcriptions
 
 ### Phase 4 — Qualité
-- [x] Suite de tests complète (207/207 ✅)
+- [x] Suite de tests complète (234/234 ✅)
 - [ ] CI/CD GitHub Actions
 - [ ] Dockerisation
 - [ ] Packaging PyPI
