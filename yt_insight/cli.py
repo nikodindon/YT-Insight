@@ -388,10 +388,21 @@ def analyze(
     llamacpp_model: Optional[str] = typer.Option(None, "--llamacpp-model"),
     llamacpp_timeout: Optional[float] = typer.Option(
         None, "--llamacpp-timeout",
-        help="HTTP timeout in seconds for the LLM request (default 1800 = 30 min). "
+        help="HTTP timeout in seconds for the LLM request (default 7200 = 2h). "
              "Increase for very long single-shot analyses on big transcripts.",
     ),
+    llamacpp_idle_timeout: Optional[float] = typer.Option(
+        None, "--llamacpp-idle-timeout",
+        help="Idle timeout between LLM tokens in seconds (default 600 = 10 min). "
+             "Must be > prompt-processing time for big chunks.",
+    ),
+    llamacpp_max_prompt_tokens: Optional[int] = typer.Option(
+        None, "--llamacpp-max-prompt-tokens",
+        help="Soft cap on prompt tokens (default 50000). Above this we switch to "
+             "chunk+merge. Must stay under your server's n_ctx.",
+    ),
     config: Optional[Path] = typer.Option(None, "--config"),
+
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Analyze a transcript (or transcribe + analyze) using the local LLM."""
@@ -443,6 +454,8 @@ def analyze(
         base_url=llamacpp_url,
         model=llamacpp_model,
         timeout_s=llamacpp_timeout,
+        idle_timeout_s=llamacpp_idle_timeout,
+        max_prompt_tokens=llamacpp_max_prompt_tokens,
     )
     t0 = time.time()
     analysis = _run_analyze_with_live(
@@ -510,7 +523,15 @@ def all(  # noqa: A001 — `all` is the command name users will type
     llamacpp_model: Optional[str] = typer.Option(None, "--llamacpp-model"),
     llamacpp_timeout: Optional[float] = typer.Option(
         None, "--llamacpp-timeout",
-        help="HTTP timeout in seconds for the LLM request (default 1800 = 30 min).",
+        help="HTTP timeout in seconds for the LLM request (default 7200 = 2h).",
+    ),
+    llamacpp_idle_timeout: Optional[float] = typer.Option(
+        None, "--llamacpp-idle-timeout",
+        help="Idle timeout between LLM tokens in seconds (default 600 = 10 min).",
+    ),
+    llamacpp_max_prompt_tokens: Optional[int] = typer.Option(
+        None, "--llamacpp-max-prompt-tokens",
+        help="Soft cap on prompt tokens (default 50000).",
     ),
     no_console: bool = typer.Option(False, "--no-console"),
     config: Optional[Path] = typer.Option(None, "--config"),
@@ -621,6 +642,8 @@ def all(  # noqa: A001 — `all` is the command name users will type
             base_url=llamacpp_url,
             model=llamacpp_model,
             timeout_s=llamacpp_timeout,
+            idle_timeout_s=llamacpp_idle_timeout,
+            max_prompt_tokens=llamacpp_max_prompt_tokens,
         )
         t0 = time.time()
         analysis = _run_analyze_with_live(

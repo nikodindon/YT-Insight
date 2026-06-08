@@ -541,10 +541,15 @@ class TestStreamingChat:
             result = analyzer._chat("hi")
         assert result == "abcdef"
 
-    def test_default_idle_timeout_is_120s(self):
+    def test_default_idle_timeout_is_10min(self):
         from yt_insight.analyzer.llamacpp_local import DEFAULT_IDLE_TIMEOUT_S
         a = create_analyzer()
-        assert a.idle_timeout_s == DEFAULT_IDLE_TIMEOUT_S == 120.0
+        assert a.idle_timeout_s == DEFAULT_IDLE_TIMEOUT_S == 600.0
+
+    def test_max_prompt_tokens_default_is_50k(self):
+        from yt_insight.analyzer.llamacpp_local import DEFAULT_MAX_PROMPT_TOKENS
+        a = create_analyzer()
+        assert a.max_prompt_tokens == DEFAULT_MAX_PROMPT_TOKENS == 50_000
 
     def test_idle_timeout_env_var(self, monkeypatch):
         monkeypatch.setenv("LLAMACPP_IDLE_TIMEOUT_S", "60")

@@ -70,10 +70,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_MODEL = "Qwen3.6-35B-A3B-UD-IQ3_S.gguf"
-DEFAULT_TIMEOUT_S = 1800.0         # 30 min — long enough for 1h chunk+merge
-DEFAULT_IDLE_TIMEOUT_S = 120.0     # 2 min — abort if no token arrives
-DEFAULT_MAX_PROMPT_TOKENS = 28_000 # safe under llama.cpp's 32k default ctx
-DEFAULT_CHUNK_OVERLAP_TOKENS = 200
+DEFAULT_TIMEOUT_S = 7200.0         # 2 h — long enough for 3h videos
+DEFAULT_IDLE_TIMEOUT_S = 600.0     # 10 min — long enough for prompt eval of big chunks
+DEFAULT_MAX_PROMPT_TOKENS = 50_000 # 50k — safe under llama.cpp's 65k default ctx
+DEFAULT_CHUNK_OVERLAP_TOKENS = 500
 DEFAULT_TEMPERATURE = 0.2          # low for structured JSON
 DEFAULT_MAX_TOKENS = 4096          # big enough for the analysis JSON
 
@@ -495,11 +495,16 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                     raise AnalysisError(
                         f"llama-server returned HTTP {resp.status_code}: {body}"
                     )
+                # NOTE: ``last_token_at`` is updated on ANY data: line
+                # (even empty content), NOT on the entry. This is
+                # because the server can take many minutes to process
+                # a big prompt before sending its first content token
+                # — we don't want to abort during that "prefill" phase.
                 last_token_at = time.time()
                 for line in resp.iter_lines():
-                    # Idle check on EVERY line read (not just data lines).
-                    # This catches the case where the server is silent
-                    # but keeps the socket open (e.g. stuck generation).
+                    # Idle check on every line read. Resets whenever
+                    # we see a data: line (even with empty content),
+                    # proving the server is still alive.
                     now = time.time()
                     if now - last_token_at > self.idle_timeout_s:
                         raise AnalysisError(
@@ -512,6 +517,8 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                     raw = line[len("data:"):].strip()
                     if raw == "[DONE]":
                         break
+                    # Server is alive — reset the idle clock.
+                    last_token_at = time.time()
                     try:
                         evt = json.loads(raw)
                     except json.JSONDecodeError:

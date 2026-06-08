@@ -439,11 +439,17 @@ yt-insight all "URL" --whisper-model medium --whisper-chunk-length 30
 # aussi forcer le CPU dès le départ via variable d'env (no GPU dispo / voulu)
 WHISPER_DEVICE=cpu yt-insight all "URL"
 
-# Augmenter le timeout HTTP pour les très longues analyses (défaut 30 min)
-yt-insight all "URL" --llamacpp-timeout 3600   # 1h
+# Augmenter le timeout HTTP pour les très longues analyses (défaut 2h)
+yt-insight all "URL" --llamacpp-timeout 14400   # 4h pour des confs géantes
 
-# Abaisser l'idle timeout pour fail-fast sur génération bloquée (défaut 2 min)
-yt-insight all "URL" --llamacpp-idle-timeout 60
+# Abaisser/augmenter l'idle timeout entre tokens (défaut 10 min).
+# Doit rester > temps de prompt processing du 1er chunk
+# (~500s sur un 28k-tokens chunk avec ce modèle sur 1650S).
+yt-insight all "URL" --llamacpp-idle-timeout 1200   # 20 min
+
+# Élargir la limite de tokens par chunk (défaut 50k).
+# Doit rester < n_ctx de votre llama-server.
+yt-insight all "URL" --llamacpp-max-prompt-tokens 80000
 
 # Pendant l'analyse, le panel Rich Live affiche les tokens en temps réel :
 #  ╭─ LLM generation ──────────────────────────────────────────╮
@@ -1202,7 +1208,7 @@ TestConstants          — 6 tests  (ordres RTFX, TPS, WPM, sanity)
 - [ ] Recherche full-text dans les transcriptions
 
 ### Phase 4 — Qualité
-- [x] Suite de tests complète (206/206 ✅)
+- [x] Suite de tests complète (207/207 ✅)
 - [ ] CI/CD GitHub Actions
 - [ ] Dockerisation
 - [ ] Packaging PyPI
