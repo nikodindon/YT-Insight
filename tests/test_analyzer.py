@@ -555,3 +555,32 @@ class TestStreamingChat:
         monkeypatch.setenv("LLAMACPP_IDLE_TIMEOUT_S", "60")
         a = create_analyzer()
         assert a.idle_timeout_s == 60.0
+
+    def test_create_analyzer_with_depth_and_sections_kwargs(self):
+        """Regression: depth + sections kwargs must propagate to LlamaCppLocalAnalyzer."""
+        a = create_analyzer(
+            depth="shallow",
+            sections="forces,biases",
+        )
+        assert a.depth.value == "shallow"
+        assert a.sections == ("forces", "biases")
+        # shallow preset forces these numeric levers.
+        assert a.temperature == 0.4
+        assert a.max_tokens == 1024
+
+    def test_create_analyzer_with_depth_env_var(self, monkeypatch):
+        monkeypatch.setenv("LLAMACPP_DEPTH", "deep")
+        a = create_analyzer()
+        assert a.depth.value == "deep"
+        # deep default sections are 6 rubrics.
+        assert len(a.sections) == 6
+
+    def test_create_analyzer_with_sections_env_var(self, monkeypatch):
+        monkeypatch.setenv("LLAMACPP_SECTIONS", "forces,weaknesses,contradictions")
+        a = create_analyzer()
+        assert a.sections == ("forces", "weaknesses", "contradictions")
+
+    def test_create_analyzer_kwarg_wins_over_env(self, monkeypatch):
+        monkeypatch.setenv("LLAMACPP_DEPTH", "deep")
+        a = create_analyzer(depth="shallow")
+        assert a.depth.value == "shallow"

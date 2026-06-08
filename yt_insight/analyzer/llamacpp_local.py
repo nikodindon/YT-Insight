@@ -681,6 +681,8 @@ def create_analyzer(
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     disable_thinking: bool = True,
+    depth: "Depth | str | None" = None,
+    sections: tuple[str, ...] | list[str] | str | None = None,
 ) -> LlamaCppLocalAnalyzer:
     """
     Build a :class:`LlamaCppLocalAnalyzer` from env vars + kwargs.
@@ -695,6 +697,18 @@ def create_analyzer(
     - ``LLAMACPP_TEMPERATURE``         → ``temperature``
     - ``LLAMACPP_MAX_TOKENS``          → ``max_tokens``
     - ``LLAMACPP_DISABLE_THINKING``    → ``disable_thinking`` ("1"/"0")
+    - ``LLAMACPP_DEPTH``               → ``depth`` (shallow/normal/deep/extreme)
+    - ``LLAMACPP_SECTIONS``            → ``sections`` (comma-separated names)
+
+    Parameters
+    ----------
+    depth:
+        Analysis depth preset. ``None`` → ``Depth.NORMAL`` → from env →
+        CLI's ``--depth`` flag. Accepts a :class:`Depth`, a string, or
+        ``None``.
+    sections:
+        Analysis rubrics. ``None`` → depth's defaults. Accepts a tuple
+        of names, a comma-separated string, or ``None``.
     """
     import os
 
@@ -738,6 +752,11 @@ def create_analyzer(
         temperature=_env_float("LLAMACPP_TEMPERATURE", temperature),
         max_tokens=_env_int("LLAMACPP_MAX_TOKENS", max_tokens),
         disable_thinking=_env_bool("LLAMACPP_DISABLE_THINKING", disable_thinking),
+        # Depth + sections: env var overrides None, kwarg wins over env.
+        depth=depth if depth is not None else (_env_str("LLAMACPP_DEPTH", "") or None),
+        sections=sections if sections is not None else (
+            _env_str("LLAMACPP_SECTIONS", "") or None
+        ),
     )
 
 
