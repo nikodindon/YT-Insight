@@ -306,7 +306,8 @@ class TestAll:
         # the download step output is NOT displayed.
         with patch("yt_insight.cli.YtDlpDownloader") as MockDL, \
              patch("yt_insight.cli.create_transcriber") as mock_create_t, \
-             patch("yt_insight.cli.create_analyzer") as mock_create_a:
+             patch("yt_insight.cli.create_analyzer") as mock_create_a, \
+             patch("pathlib.Path.exists", return_value=False):  # no cache hit → force re-transcription
             MockDL.return_value.download.return_value = fake_download_result
             mock_t = MagicMock()
             mock_t.transcribe.return_value = fake_transcription
@@ -326,6 +327,81 @@ class TestAll:
         assert result.exit_code == 0
         mock_t.transcribe.assert_called_once()
         mock_a.analyze.assert_called_once()
+
+    def test_transcript_cache_hit_skips_transcription(
+        self, tmp_path, fake_analysis,
+    ):
+        # If a transcript JSON already exists in cache, we should NOT
+        # call transcriber.transcribe() again.
+        from unittest.mock import MagicMock as _MM
+        from yt_insight.downloader.ytdlp_downloader import VideoMetadata, DownloadResult
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        video_id = "abc123"
+        cached = cache_dir / f"{video_id}.transcript.json"
+        cached.write_text(json.dumps({
+            "text": "Cached transcript text",
+            "language": "en",
+            "language_probability": 0.99,
+            "duration_seconds": 30.0,
+            "model_name": "tiny",
+            "segments": [
+                {"start": 0.0, "end": 5.0, "text": "Hello world"},
+            ],
+        }))
+
+        # Build a real DownloadResult with the right video_id + audio path.
+        dl = DownloadResult(
+            audio_path=cache_dir / f"{video_id}.mp3",
+            metadata=VideoMetadata(
+                video_id=video_id,
+                title="T", channel="C", duration_seconds=30.0,
+                description="", upload_date="", view_count=0, url="x",
+            ),
+            from_cache=True,
+        )
+
+        with patch("yt_insight.cli.YtDlpDownloader") as MockDL, \
+             patch("yt_insight.cli.create_transcriber") as mock_create_t, \
+             patch("yt_insight.cli.create_analyzer") as mock_create_a, \
+             patch("yt_insight.cli._load_app_config") as mock_cfg:
+            # Make paths.cache_dir point at our tmp cache.
+            from yt_insight.utils.config import PathsConfig
+            mock_cfg.return_value.paths = PathsConfig(
+                output_dir=tmp_path / "out",
+                cache_dir=cache_dir,
+                keep_audio=False,
+            )
+            MockDL.return_value.download.return_value = dl
+
+            mock_t = MagicMock()
+            mock_t.transcribe.return_value = None  # would fail if called
+            mock_create_t.return_value = mock_t
+
+            mock_a = MagicMock()
+            mock_a.__enter__ = MagicMock(return_value=mock_a)
+            mock_a.__exit__ = MagicMock(return_value=False)
+            mock_a.analyze.return_value = fake_analysis
+            mock_a.model_name = "M"
+            mock_a.backend_name = "B"
+            mock_create_a.return_value = mock_a
+
+            result = runner.invoke(app, [
+                "all", f"https://youtu.be/{video_id}",
+                "--steps", "transcribe,analyze",
+                "--no-console",
+            ])
+
+        assert result.exit_code == 0, result.stdout
+        # Critical: the transcriber was NEVER instantiated.
+        mock_create_t.assert_not_called()
+        mock_t.transcribe.assert_not_called()
+        # But the analyzer was called with our cached transcript.
+        mock_a.analyze.assert_called_once()
+        # And the cached text was passed to the analyzer.
+        analyze_call_args = mock_a.analyze.call_args
+        assert "Cached transcript text" in str(analyze_call_args)
 
 
 # ---------------------------------------------------------------------------

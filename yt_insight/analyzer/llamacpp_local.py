@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_MODEL = "Qwen3.6-35B-A3B-UD-IQ3_S.gguf"
-DEFAULT_TIMEOUT_S = 600.0          # big enough for chunk+merge on long videos
+DEFAULT_TIMEOUT_S = 1800.0         # 30 min — long enough for 1h chunk+merge
 DEFAULT_MAX_PROMPT_TOKENS = 28_000 # safe under llama.cpp's 32k default ctx
 DEFAULT_CHUNK_OVERLAP_TOKENS = 200
 DEFAULT_TEMPERATURE = 0.2          # low for structured JSON
@@ -214,9 +214,16 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
                 "httpx is not installed. Run: pip install httpx"
             )
         if self._client is None:
+            # Connect quickly (10s), read generously (timeout_s).
+            # write=10s is fine since we never upload big payloads.
             self._client = httpx.Client(
                 base_url=self.base_url,
-                timeout=httpx.Timeout(self.timeout_s, connect=10.0),
+                timeout=httpx.Timeout(
+                    connect=10.0,
+                    read=self.timeout_s,
+                    write=10.0,
+                    pool=10.0,
+                ),
             )
         return self._client
 

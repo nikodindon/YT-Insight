@@ -274,6 +274,11 @@ def analyze(
     no_console: bool = typer.Option(False, "--no-console", help="Skip the Rich console rendering."),
     llamacpp_url: Optional[str] = typer.Option(None, "--llamacpp-url"),
     llamacpp_model: Optional[str] = typer.Option(None, "--llamacpp-model"),
+    llamacpp_timeout: Optional[float] = typer.Option(
+        None, "--llamacpp-timeout",
+        help="HTTP timeout in seconds for the LLM request (default 1800 = 30 min). "
+             "Increase for very long single-shot analyses on big transcripts.",
+    ),
     config: Optional[Path] = typer.Option(None, "--config"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -325,6 +330,7 @@ def analyze(
     analyzer = create_analyzer(
         base_url=llamacpp_url,
         model=llamacpp_model,
+        timeout_s=llamacpp_timeout,
     )
     t0 = time.time()
     with analyzer:
@@ -381,6 +387,10 @@ def all(  # noqa: A001 — `all` is the command name users will type
     ),
     llamacpp_url: Optional[str] = typer.Option(None, "--llamacpp-url"),
     llamacpp_model: Optional[str] = typer.Option(None, "--llamacpp-model"),
+    llamacpp_timeout: Optional[float] = typer.Option(
+        None, "--llamacpp-timeout",
+        help="HTTP timeout in seconds for the LLM request (default 1800 = 30 min).",
+    ),
     no_console: bool = typer.Option(False, "--no-console"),
     config: Optional[Path] = typer.Option(None, "--config"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -428,23 +438,42 @@ def all(  # noqa: A001 — `all` is the command name users will type
 
     # --- Step 2: transcribe -------------------------------------------
     if "transcribe" in steps_set:
-        transcriber = create_transcriber(
-            model_size=app_cfg.transcription.model,
-            device=app_cfg.transcription.device,
-            compute_type=app_cfg.transcription.compute_type,
-            language=language or app_cfg.transcription.language,
-            chunk_length=whisper_chunk_length,
-        )
-        t0 = time.time()
-        transcription = transcriber.transcribe(dl.audio_path, language=language)
-        elapsed = time.time() - t0
-        transcriber.unload()
-        _print_kv(console, [
-            ("🎙️ Langue",         f"{transcription.language} (p={transcription.language_probability:.2f})"),
-            ("    Segments",      str(len(transcription.segments))),
-            ("    Tokens estimés", f"{transcription.estimated_tokens:,}"),
-            ("    Temps",         f"{elapsed:.1f}s"),
-        ])
+        # Cache check: reuse an existing transcript if present.
+        transcript_cache = paths.cache_dir / f"{dl.metadata.video_id}.transcript.json"
+        if transcript_cache.exists():
+            console.print(
+                f"  [green]✓[/green] Transcript en cache : {transcript_cache} "
+                "[dim](transcription skipped)[/dim]"
+            )
+            transcription = TranscriptionResult.from_dict(
+                json.loads(transcript_cache.read_text(encoding="utf-8"))
+            )
+        else:
+            transcriber = create_transcriber(
+                model_size=app_cfg.transcription.model,
+                device=app_cfg.transcription.device,
+                compute_type=app_cfg.transcription.compute_type,
+                language=language or app_cfg.transcription.language,
+                chunk_length=whisper_chunk_length,
+            )
+            t0 = time.time()
+            transcription = transcriber.transcribe(dl.audio_path, language=language)
+            elapsed = time.time() - t0
+            transcriber.unload()
+            _print_kv(console, [
+                ("🎙️ Langue",         f"{transcription.language} (p={transcription.language_probability:.2f})"),
+                ("    Segments",      str(len(transcription.segments))),
+                ("    Tokens estimés", f"{transcription.estimated_tokens:,}"),
+                ("    Temps",         f"{elapsed:.1f}s"),
+            ])
+            # Save transcript to cache so the next run skips re-transcription.
+            transcript_cache.write_text(
+                json.dumps(transcription.to_dict(), ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            console.print(
+                f"  [dim]Transcript sauvé dans {transcript_cache}[/dim]"
+            )
 
     if "analyze" in steps_set and transcription is None:
         # If the user asked for analyze but skipped transcribe, the
@@ -470,6 +499,7 @@ def all(  # noqa: A001 — `all` is the command name users will type
         analyzer = create_analyzer(
             base_url=llamacpp_url,
             model=llamacpp_model,
+            timeout_s=llamacpp_timeout,
         )
         t0 = time.time()
         with analyzer:

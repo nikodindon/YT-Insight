@@ -86,6 +86,28 @@ class TranscriptionResult:
             ],
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "TranscriptionResult":
+        """
+        Inverse of :meth:`to_dict`. Used to reload a transcript that was
+        previously cached to JSON (skips re-transcription on subsequent runs).
+        """
+        return cls(
+            text=d["text"],
+            language=d["language"],
+            language_probability=float(d["language_probability"]),
+            duration_seconds=float(d["duration_seconds"]),
+            model_name=d.get("model_name", "unknown"),
+            segments=[
+                Segment(
+                    start=float(s["start"]),
+                    end=float(s["end"]),
+                    text=s["text"],
+                )
+                for s in d.get("segments", [])
+            ],
+        )
+
 
 # ---------------------------------------------------------------------------
 # Abstract transcriber
