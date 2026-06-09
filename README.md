@@ -152,6 +152,7 @@ A `config.yaml` is also supported for structured config (see
 | [docs/OUTPUT.md](docs/OUTPUT.md) | Markdown vs JSON, when to use which, structure, programmatic access |
 | [docs/ANALYSIS_DEPTH.md](docs/ANALYSIS_DEPTH.md) | The 4 depth presets × 8 section rubrics, matrix, recommended recipes |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Backlog, completed tickets, design notes |
+| [docs/session-handoff.md](docs/session-handoff.md) | End-of-session summary, state of the project, bug history. **Read this on resume.** |
 
 ## Project structure
 
