@@ -73,7 +73,7 @@ cached in `./cache/`.
 
 ## State of the project
 
-**234/234 tests pass** ✅
+**257/257 tests pass** ✅
 
 | Phase | Status |
 |-------|--------|
