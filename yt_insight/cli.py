@@ -472,6 +472,12 @@ def analyze(
         help="Soft cap on prompt tokens (default 50000). Above this we switch to "
              "chunk+merge. Must stay under your server's n_ctx.",
     ),
+    llamacpp_repetition_penalty: Optional[float] = typer.Option(
+        None, "--llamacpp-repetition-penalty",
+        help="Penalty for already-generated tokens (default 1.1). "
+             "Values > 1.0 discourage repetition and break infinite loops. "
+             "1.0 = no penalty. Recommended: 1.05–1.2 for long generations.",
+    ),
     depth: Optional[str] = typer.Option(
         None, "--depth",
         help="Analysis depth preset: shallow | normal | deep | extreme. "
@@ -548,6 +554,7 @@ def analyze(
         max_prompt_tokens=llamacpp_max_prompt_tokens,
         depth=depth_obj,
         sections=sections_tuple,
+        repetition_penalty=llamacpp_repetition_penalty,
     )
     t0 = time.time()
     analysis = _run_analyze_with_live(
@@ -626,6 +633,11 @@ def all(  # noqa: A001 — `all` is the command name users will type
     llamacpp_max_prompt_tokens: Optional[int] = typer.Option(
         None, "--llamacpp-max-prompt-tokens",
         help="Soft cap on prompt tokens (default 50000).",
+    ),
+    llamacpp_repetition_penalty: Optional[float] = typer.Option(
+        None, "--llamacpp-repetition-penalty",
+        help="Repetition penalty (default 1.1). 1.0 = no penalty. "
+             "Recommended: 1.05–1.2 to break infinite loops in long gens.",
     ),
     depth: Optional[str] = typer.Option(
         None, "--depth",
@@ -756,6 +768,7 @@ def all(  # noqa: A001 — `all` is the command name users will type
             max_prompt_tokens=llamacpp_max_prompt_tokens,
             depth=depth_obj,
             sections=sections_tuple,
+            repetition_penalty=llamacpp_repetition_penalty,
         )
         t0 = time.time()
         analysis = _run_analyze_with_live(

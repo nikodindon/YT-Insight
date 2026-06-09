@@ -85,6 +85,7 @@ use 95% of the time.
 | `--llamacpp-timeout` | `7200` (2h) | Wall-clock HTTP timeout in seconds |
 | `--llamacpp-idle-timeout` | `1800` (30 min) | Per-token idle timeout. Must be > your server's prompt processing time. Observed 14 min for 30k tokens on a GTX 1650S. |
 | `--llamacpp-max-prompt-tokens` | `50000` | Soft cap; above this we switch to chunk+merge |
+| `--llamacpp-repetition-penalty` | `1.1` | Penalty for already-generated tokens. 1.0 = no penalty. Recommended 1.05-1.2 to break infinite loops in long generations. |
 
 **Analysis depth & sections (see [ANALYSIS_DEPTH.md](ANALYSIS_DEPTH.md)):**
 

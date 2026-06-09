@@ -729,3 +729,31 @@ class TestCliDepthSectionsPropagation:
         a = create_analyzer(depth=depth_obj, sections=sections)
         assert a.depth.value == "shallow"
         assert len(a.sections) == 1  # just 'forces'
+
+    def test_repetition_penalty_default_is_1_1(self):
+        """Default repetition_penalty is 1.1, which breaks infinite loops."""
+        from yt_insight.analyzer.llamacpp_local import DEFAULT_REPETITION_PENALTY
+        a = create_analyzer()
+        assert a.repetition_penalty == DEFAULT_REPETITION_PENALTY
+        assert a.repetition_penalty == 1.1
+
+    def test_repetition_penalty_override(self):
+        a = create_analyzer(repetition_penalty=1.2)
+        assert a.repetition_penalty == 1.2
+
+    def test_repetition_penalty_env_var(self, monkeypatch):
+        monkeypatch.setenv("LLAMACPP_REPETITION_PENALTY", "1.15")
+        a = create_analyzer()
+        assert a.repetition_penalty == 1.15
+
+    def test_repetition_penalty_in_payload(self):
+        """When > 1.0, repetition_penalty is in the chat completion payload."""
+        a = create_analyzer(repetition_penalty=1.1)
+        payload = a._build_payload("hello", stream=False)
+        assert payload["repetition_penalty"] == 1.1
+
+    def test_repetition_penalty_omitted_when_neutral(self):
+        """When == 1.0, the field is omitted (no penalty is the default)."""
+        a = create_analyzer(repetition_penalty=1.0)
+        payload = a._build_payload("hello", stream=False)
+        assert "repetition_penalty" not in payload

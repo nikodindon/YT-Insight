@@ -76,6 +76,7 @@ DEFAULT_IDLE_TIMEOUT_S = 1800.0   # 30 min — covers prompt eval of very large 
 DEFAULT_MAX_PROMPT_TOKENS = 50_000 # 50k — safe under llama.cpp's 65k default ctx
 DEFAULT_CHUNK_OVERLAP_TOKENS = 500
 DEFAULT_TEMPERATURE = 0.2          # low for structured JSON
+DEFAULT_REPETITION_PENALTY = 1.1    # discourage infinite loops in long gens
 DEFAULT_MAX_TOKENS = 4096          # big enough for the analysis JSON
 
 
@@ -265,6 +266,12 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         stalls) that wall-clock timeouts miss.
     system_prompt:
         Override the default system prompt. Must remain JSON-strict.
+    repetition_penalty:
+        Penalty applied by llama.cpp to tokens that have already been
+        generated. Values > 1.0 discourage repetition (recommended for
+        long generations to avoid "infinite loop" degeneration). Default
+        1.1 strikes a good balance — high enough to break the kind of
+        loops we hit on the Asselineau and Jancovici cours 8 runs.
     """
 
     def __init__(
@@ -282,6 +289,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         system_prompt: str | None = None,
         depth: "Depth" = None,                  # see ``yt_insight.analyzer.depth``
         sections: tuple[str, ...] | None = None,
+        repetition_penalty: float = DEFAULT_REPETITION_PENALTY,
     ):
         from .depth import Depth, DEPTH_DEFAULT_SECTIONS, DEPTH_PRESETS, coerce_sections
         if depth is None:
@@ -319,6 +327,7 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
         self.system_prompt = system_prompt or prompts.SYSTEM_PROMPT
         self.depth = depth
         self.sections = sections
+        self.repetition_penalty = repetition_penalty
 
         self._client: httpx.Client | None = None
         # Resolved at first call (after server handshake) — may differ
@@ -590,6 +599,11 @@ class LlamaCppLocalAnalyzer(BaseAnalyzer):
             "max_tokens": self.max_tokens,
             "stream": stream,
         }
+        # Repetition penalty is only meaningful when > 1.0; 1.0 is
+        # the neutral value (no penalty). Omit from payload when
+        # neutral to keep the request minimal.
+        if self.repetition_penalty != 1.0:
+            payload["repetition_penalty"] = self.repetition_penalty
         if self.disable_thinking:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         return payload
@@ -776,6 +790,7 @@ def create_analyzer(
     disable_thinking: bool | None = None,
     depth: "Depth | str | None" = None,
     sections: tuple[str, ...] | list[str] | str | None = None,
+    repetition_penalty: float | None = None,
 ) -> LlamaCppLocalAnalyzer:
     """
     Build a :class:`LlamaCppLocalAnalyzer` from env vars + kwargs.
@@ -792,6 +807,7 @@ def create_analyzer(
     - ``LLAMACPP_DISABLE_THINKING``    → ``disable_thinking`` ("1"/"0")
     - ``LLAMACPP_DEPTH``               → ``depth`` (shallow/normal/deep/extreme)
     - ``LLAMACPP_SECTIONS``            → ``sections`` (comma-separated names)
+    - ``LLAMACPP_REPETITION_PENALTY``  → ``repetition_penalty`` (float, default 1.1)
 
     Parameters
     ----------
@@ -859,6 +875,11 @@ def create_analyzer(
     eff_max_prompt = max_prompt_tokens if max_prompt_tokens is not None else DEFAULT_MAX_PROMPT_TOKENS
     eff_idle = idle_timeout_s if idle_timeout_s is not None else DEFAULT_IDLE_TIMEOUT_S
     eff_timeout = timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S
+    eff_repetition = (
+        repetition_penalty
+        if repetition_penalty is not None
+        else DEFAULT_REPETITION_PENALTY
+    )
 
     return LlamaCppLocalAnalyzer(
         base_url=base_url or _env_str("LLAMACPP_BASE_URL", DEFAULT_BASE_URL),
@@ -880,6 +901,9 @@ def create_analyzer(
         depth=depth if depth is not None else (_env_str("LLAMACPP_DEPTH", "") or None),
         sections=sections if sections is not None else (
             _env_str("LLAMACPP_SECTIONS", "") or None
+        ),
+        repetition_penalty=_env_float_or_default(
+            "LLAMACPP_REPETITION_PENALTY", eff_repetition
         ),
     )
 
