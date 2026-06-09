@@ -22,7 +22,7 @@ clear "Definition of Done".
 - [ ] **Markdown backlinks** — auto-link between related videos via topic tags.
 
 ## Phase 4 — Quality
-- [x] Suite de tests complète (200/200 ✅)
+- [x] Suite de tests complète (252/252 ✅)
 - [ ] CI/CD GitHub Actions (lint + test on every PR)
 - [ ] Dockerisation (multi-stage image, ~500 Mo final)
 - [ ] Packaging PyPI (`pip install yt-insight`)
