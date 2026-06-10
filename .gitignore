@@ -26,3 +26,9 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local models (downloaded separately, not shipped in repo)
+models/
+
+# YouTube cookies (Netscape format, browser-exported) — private to each user
+www.youtube.com_cookies.txt

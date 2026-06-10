@@ -108,6 +108,8 @@ class YtDlpDownloader:
         audio_format: str = "mp3",
         audio_quality: str = "192",   # kbps
         keep_audio: bool = True,
+        cookies_file: Optional[str] = None,
+        js_runtimes: Optional[str] = None,
     ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -115,6 +117,8 @@ class YtDlpDownloader:
         self.audio_format = audio_format
         self.audio_quality = audio_quality
         self.keep_audio = keep_audio
+        self.cookies_file = cookies_file
+        self.js_runtimes = js_runtimes
 
     # ------------------------------------------------------------------
     # Public API
@@ -169,11 +173,7 @@ class YtDlpDownloader:
         Fetch video metadata without downloading the audio.
         Useful to preview title/duration before committing.
         """
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-        }
+        ydl_opts = self._base_ydl_opts(skip_download=True)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
                 info = ydl.extract_info(url, download=False)
@@ -186,29 +186,56 @@ class YtDlpDownloader:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _download(self, url: str, video_id: str, audio_path: Path) -> VideoMetadata:
-        """Run yt-dlp and return parsed metadata."""
+    def _base_ydl_opts(
+        self,
+        skip_download: bool = False,
+        output_template: Optional[str] = None,
+    ) -> dict:
+        """
+        Build a base yt-dlp options dict with our common settings.
 
-        ydl_opts = {
-            # Audio only — best available quality
-            "format": "bestaudio/best",
-            # Convert to target format via ffmpeg
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": self.audio_format,
-                    "preferredquality": self.audio_quality,
-                }
-            ],
-            # Output template: fixed path so we know where the file lands
-            "outtmpl": str(self.cache_dir / f"{video_id}.%(ext)s"),
+        Cookies + JS runtime are passed through so YouTube's bot checks
+        and n-challenge solver work without manual flags.
+        """
+        opts: dict = {
             # Silence yt-dlp's own output (we handle progress via Rich)
             "quiet": True,
             "no_warnings": True,
-            # Don't write yt-dlp's own info/thumbnail files
-            "writeinfojson": False,
-            "writethumbnail": False,
+            "skip_download": skip_download,
         }
+        if output_template:
+            opts["outtmpl"] = output_template
+        if self.cookies_file:
+            opts["cookiefile"] = self.cookies_file
+        if self.js_runtimes:
+            # Accept either "node" (auto-discover) or "node:/path/to/node"
+            # (explicit binary path). yt-dlp expects a dict mapping runtime
+            # name → config (path or None for PATH lookup).
+            if ":" in self.js_runtimes:
+                name, _, path = self.js_runtimes.partition(":")
+                opts["js_runtimes"] = {name: {"path": path}}
+            else:
+                opts["js_runtimes"] = {self.js_runtimes: {}}
+        return opts
+
+    def _download(self, url: str, video_id: str, audio_path: Path) -> VideoMetadata:
+        """Run yt-dlp and return parsed metadata."""
+
+        ydl_opts = self._base_ydl_opts(
+            skip_download=False,
+            output_template=str(self.cache_dir / f"{video_id}.%(ext)s"),
+        )
+        # Audio extraction: best available, then ffmpeg → mp3
+        ydl_opts["format"] = "bestaudio/best"
+        ydl_opts["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": self.audio_format,
+                "preferredquality": self.audio_quality,
+            }
+        ]
+        ydl_opts["writeinfojson"] = False
+        ydl_opts["writethumbnail"] = False
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:

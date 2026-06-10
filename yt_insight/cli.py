@@ -652,6 +652,22 @@ def all(  # noqa: A001 — `all` is the command name users will type
     no_console: bool = typer.Option(False, "--no-console"),
     config: Optional[Path] = typer.Option(None, "--config"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    cookies: Optional[Path] = typer.Option(
+        None, "--cookies",
+        help="Path to a Netscape-format cookies.txt file. Required for YouTube "
+             "videos that gate downloads behind a 'Sign in to confirm you're "
+             "not a bot' check. Export from your browser while logged in to "
+             "youtube.com (e.g. via the 'Get cookies.txt LOCALLY' extension).",
+    ),
+    js_runtime: Optional[str] = typer.Option(
+        None, "--js-runtime",
+        help="JavaScript runtime for yt-dlp's n-challenge solver. "
+             "Format: 'name' or 'name:/path/to/binary'. "
+             "Common: 'node' (needs Node.js 18+), 'deno', 'bun'. "
+             "Default: 'node' if found on PATH. Pass an absolute path "
+             "if yt-dlp cannot find your runtime (e.g. node installed in "
+             "~/.local/bin).",
+    ),
 ) -> None:
     """Run the full pipeline: download → transcribe → analyze → render + write."""
     app_cfg = _load_app_config(config, verbose)
@@ -675,8 +691,23 @@ def all(  # noqa: A001 — `all` is the command name users will type
     transcription: TranscriptionResult | None = None
 
     # --- Step 1: download ---------------------------------------------
+    # Resolve JS runtime default: yt-dlp looks on PATH but our user
+    # has node in ~/.local/bin which it may miss. Pre-detect and pass
+    # explicit path so the n-challenge solver works.
+    resolved_js_runtime = js_runtime
+    if resolved_js_runtime is None:
+        import shutil
+        node_path = shutil.which("node")
+        if node_path:
+            resolved_js_runtime = f"node:{node_path}"
+
+    downloader = YtDlpDownloader(
+        cache_dir=paths.cache_dir,
+        cookies_file=str(cookies) if cookies else None,
+        js_runtimes=resolved_js_runtime,
+    )
+
     if "download" in steps_set:
-        downloader = YtDlpDownloader(cache_dir=paths.cache_dir)
         dl = downloader.download(url)
         title = dl.metadata.title
         metadata = dl.metadata
@@ -689,7 +720,6 @@ def all(  # noqa: A001 — `all` is the command name users will type
         ])
     else:
         # We still need the audio path to transcribe. Re-download silently.
-        downloader = YtDlpDownloader(cache_dir=paths.cache_dir)
         dl = downloader.download(url)
         title = dl.metadata.title
         metadata = dl.metadata
